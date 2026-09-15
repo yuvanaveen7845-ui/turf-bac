@@ -1,0 +1,86 @@
+import uuid
+from django.db import models
+from django.conf import settings
+from django.utils import timezone
+from turfs.models import Turf, TimeSlot
+
+
+class Booking(models.Model):
+    STATUS_CHOICES = (
+        ("UPCOMING", "Upcoming"),
+        ("PAYMENT_PENDING", "Payment Pending"),
+        ("CONFIRMED", "Confirmed"),
+        ("CHECKED_IN", "Checked-in"),
+        ("IN_PROGRESS", "In Progress"),
+        ("COMPLETED", "Completed"),
+        ("CANCELLED", "Cancelled"),
+        ("NO_SHOW", "No-show"),
+        ("REFUNDED", "Refunded"),
+    )
+
+    BOOKING_TYPE_CHOICES = (
+        ("REGULAR", "Regular Booking"),
+        ("RECURRING", "Recurring Booking"),
+        ("GROUP", "Group / Team Booking"),
+        ("WALK_IN", "Walk-in Booking"),
+    )
+
+    booking_id = models.CharField(max_length=30, unique=True, db_index=True)
+    customer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bookings"
+    )
+    turf = models.ForeignKey(Turf, on_delete=models.CASCADE, related_name="bookings")
+    date = models.DateField(db_index=True)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    slots = models.ManyToManyField(TimeSlot, related_name="slot_bookings", blank=True)
+
+    booking_type = models.CharField(
+        max_length=20, choices=BOOKING_TYPE_CHOICES, default="REGULAR"
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="CONFIRMED", db_index=True
+    )
+
+    # Financial details
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    final_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    balance_due = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+
+    coupon_code = models.CharField(max_length=50, blank=True)
+    pricing_breakdown = models.JSONField(default=dict, blank=True)
+    participants = models.JSONField(default=list, blank=True)
+    notes = models.TextField(blank=True)
+
+    # Check-in and lifecycle tracking
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    checked_in_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="verified_checkins",
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancel_reason = models.TextField(blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.booking_id} | {self.turf.name} | {self.date} [{self.status}]"
+
+    @classmethod
+    def generate_booking_id(cls, date_obj=None):
+        if not date_obj:
+            date_obj = timezone.now().date()
+        date_str = date_obj.strftime("%Y%m%d")
+        random_str = uuid.uuid4().hex[:5].upper()
+        return f"FT-{date_str}-{random_str}"

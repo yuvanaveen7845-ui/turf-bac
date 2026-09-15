@@ -1,0 +1,29 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+*.venv
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Media QR Codes
+media/qr_codes/*
+!media/qr_codes/.gitkeep
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+.env

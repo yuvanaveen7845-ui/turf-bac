@@ -15,7 +15,7 @@ services:
       - key: ALLOWED_HOSTS
         value: "*"
       - key: DATABASE_URL
-        value: "postgresql://postgres:Friendsturf%4012345@db.tsqskggpbikhgypablih.supabase.co:5432/postgres"
+        value: "postgresql://postgres.tsqskggpbikhgypablih:Friendsturf%4012345@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
       - key: DB_SSL_REQUIRE
         value: "true"
 

@@ -42,6 +42,7 @@ def stream_events(request):
 
     def event_generator():
         last_check = time.time()
+        start_time = time.time()
         # Initial greeting event
         yield format_sse({
             "type": "CONNECTION_ESTABLISHED",
@@ -51,7 +52,9 @@ def stream_events(request):
         }, event_name="open")
 
         heartbeat_counter = 0
-        while True:
+        # Limit single connection stream to 20 seconds to stay safely under Gunicorn's 30s worker timeout.
+        # The browser EventSource will automatically reconnect seamlessly.
+        while time.time() - start_time < 20:
             time.sleep(0.5)
             heartbeat_counter += 1
             now = time.time()
@@ -63,13 +66,13 @@ def stream_events(request):
                 for ev in new_events:
                     yield format_sse(ev, event_name=ev["type"])
             
-            # Send keep-alive comment ping every 15 seconds (30 cycles of 0.5s)
-            if heartbeat_counter >= 30:
+            # Send keep-alive comment ping every 5 seconds (10 cycles of 0.5s)
+            if heartbeat_counter >= 10:
                 heartbeat_counter = 0
                 yield f": heartbeat {now}\n\n"
 
     response = StreamingHttpResponse(event_generator(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
+    response["Cache-Control"] = "no-cache, no-transform"
     response["X-Accel-Buffering"] = "no"
     return response
 

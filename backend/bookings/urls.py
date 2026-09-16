@@ -8,11 +8,13 @@ from .views import (
     PricePreviewView,
     StaffTodayBookingsView,
     StaffWalkInBookingView,
+    RecordOfflinePaymentView,
 )
 
 urlpatterns = [
     path("", BookingListCreateView.as_view(), name="booking_list_create"),
     path("preview-price/", PricePreviewView.as_view(), name="preview_price"),
+    path("lock/", LockSlotView.as_view(), name="lock_slots_alias"),
     path("lock-slots/", LockSlotView.as_view(), name="lock_slots"),
     path("staff/today/", StaffTodayBookingsView.as_view(), name="staff_today"),
     path("staff/walk-in/", StaffWalkInBookingView.as_view(), name="staff_walk_in"),
@@ -25,4 +27,10 @@ urlpatterns = [
         RescheduleBookingView.as_view(),
         name="reschedule_booking",
     ),
+    path(
+        "<str:identifier>/offline-payment/",
+        RecordOfflinePaymentView.as_view(),
+        name="record_offline_payment",
+    ),
 ]
+

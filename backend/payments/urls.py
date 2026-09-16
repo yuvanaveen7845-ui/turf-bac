@@ -1,8 +1,34 @@
 from django.urls import path
-from .views import PaymentListCreateView, ProcessRefundView, RefundListView
+from .views import (
+    PaymentListCreateView,
+    CreateRazorpayOrderView,
+    VerifyRazorpayPaymentView,
+    RazorpayWebhookView,
+    ProcessRefundView,
+    RefundListView,
+    ManualCollectPaymentView,
+    AdminPaymentStatsView,
+    ReceiptDetailView,
+    CancellationQuoteView,
+    DailyCashDrawerView,
+    ReconciliationScanView,
+    ReconciliationResolveView,
+    ExportPaymentsCsvView,
+)
 
 urlpatterns = [
     path("", PaymentListCreateView.as_view(), name="payment_list_create"),
+    path("stats/", AdminPaymentStatsView.as_view(), name="admin_payment_stats"),
+    path("manual-collect/", ManualCollectPaymentView.as_view(), name="manual_collect_payment"),
+    path("razorpay/create-order/", CreateRazorpayOrderView.as_view(), name="razorpay_create_order"),
+    path("razorpay/verify/", VerifyRazorpayPaymentView.as_view(), name="razorpay_verify"),
+    path("razorpay/webhook/", RazorpayWebhookView.as_view(), name="razorpay_webhook"),
     path("refunds/", RefundListView.as_view(), name="refund_list"),
     path("<str:pk>/refund/", ProcessRefundView.as_view(), name="process_refund"),
+    path("<str:identifier>/receipt/", ReceiptDetailView.as_view(), name="receipt_detail"),
+    path("daily-cash/", DailyCashDrawerView.as_view(), name="daily_cash_drawer"),
+    path("reconciliation/", ReconciliationScanView.as_view(), name="reconciliation_scan"),
+    path("reconciliation/resolve/", ReconciliationResolveView.as_view(), name="reconciliation_resolve"),
+    path("cancellation-quote/<str:booking_id>/", CancellationQuoteView.as_view(), name="cancellation_quote"),
+    path("export/", ExportPaymentsCsvView.as_view(), name="export_payments_csv"),
 ]

@@ -81,6 +81,7 @@ class Booking(models.Model):
     def generate_booking_id(cls, date_obj=None):
         if not date_obj:
             date_obj = timezone.now().date()
-        date_str = date_obj.strftime("%Y%m%d")
-        random_str = uuid.uuid4().hex[:5].upper()
-        return f"FT-{date_str}-{random_str}"
+        year_suffix = date_obj.strftime("%y")  # e.g., '26'
+        random_str = uuid.uuid4().hex[:6].upper()
+        return f"FT-{year_suffix}-{random_str}"
+

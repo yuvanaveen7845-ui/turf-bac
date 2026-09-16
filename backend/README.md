@@ -1,6 +1,6 @@
 # ⚽ Friends Turf - Backend API & Services
 
-RESTful Backend and Business Engines for **Friends Turf** Turf Booking & Operations Management System, built with **Django 6.1.1**, **Django REST Framework**, and **MongoDB**.
+RESTful Backend and Business Engines for **Friends Turf** Turf Booking & Operations Management System, built with **Django 6.1.1**, **Django REST Framework**, and **Supabase PostgreSQL**.
 
 ---
 
@@ -8,16 +8,16 @@ RESTful Backend and Business Engines for **Friends Turf** Turf Booking & Operati
 
 The backend is composed of 14 modular applications:
 
-- **`accounts`**: Custom User model, JWT authentication, Customer/Staff profiles, RBAC permissions (`IsAdmin`, `IsStaffOrAdmin`).
+- **`accounts`**: Custom User model, JWT authentication, Customer/Staff profiles, strict 3-role RBAC (`CUSTOMER`, `STAFF`, `ADMIN`).
 - **`turfs`**: Turf venues (*The Champions Arena*, *Legends Box Cricket*, *Strikers Dome*), amenities, and time slots.
 - **`bookings`**: Booking engine with 5-minute temporary slot reservation lock, multi-slot bookings, atomic state machine, cancellation with auto-refund to wallet, and rescheduling.
-- **`payments`**: Payment records, refund records, and simulated payment gateway with full, 50% partial advance, and pay-at-venue models.
+- **`payments`**: Payment records, refund records, and Razorpay/Offline cash engines.
 - **`pricing`**: Dynamic Pricing Engine calculating surge hours, morning discounts, and weekend rates.
 - **`promotions`**: Discount coupons (Percentage & Flat cash), referral tracking, and invite bonuses.
 - **`memberships`**: Silver, Gold, and Platinum tier plans with booking priority and discounts.
 - **`wallet`**: Customer wallet ledger and loyalty points converter (1 point per ₹10 spent, 1 point = ₹1).
 - **`qr_system`**: Tamper-proof JWT QR ticket generator and staff scanner validation service with duplicate entry prevention.
-- **`reviews`**: Customer ratings with ground and staff breakdown, feedback moderation, and manager replies.
+- **`reviews`**: Customer ratings with ground and staff breakdown, feedback moderation, and admin replies.
 - **`notifications`**: In-app notification dispatching.
 - **`maintenance`**: Pitch maintenance scheduler with automatic slot blocking.
 - **`reports`**: Admin KPIs, 7-day revenue trend, peak hours analysis, turf utilization, and daily audit summary.
@@ -28,8 +28,9 @@ The backend is composed of 14 modular applications:
 ## 🛠️ Installation & Setup
 
 ### Prerequisites
-- Python 3.12+
-- MongoDB 7.0+ (running locally on port `27017`)
+- Python 3.10+ / 3.12+
+- **Local Development**: SQLite (Built-in, zero-setup default)
+- **Production / Deployment**: Supabase PostgreSQL (enabled via `DATABASE_URL`)
 
 ### 1. Virtual Environment & Dependencies
 ```bash
@@ -62,10 +63,12 @@ This populates:
 
 ### 4. Start Server
 ```bash
-python manage.py runserver 127.0.0.1:8000
+python manage.py runserver 127.0.0.1:8001
+# or
+python manage.py runserver 8001
 ```
 
-API Root: `http://127.0.0.1:8000/api/`
+API Root: `http://127.0.0.1:8001/api/`
 
 ---
 

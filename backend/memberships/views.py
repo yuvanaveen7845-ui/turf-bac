@@ -11,6 +11,7 @@ from notifications.models import Notification
 
 
 class MembershipPlanListView(generics.ListCreateAPIView):
+    pagination_class = None
     serializer_class = MembershipPlanSerializer
 
     def get_queryset(self):

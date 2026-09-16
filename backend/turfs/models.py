@@ -36,6 +36,32 @@ class Turf(models.Model):
         max_digits=10, decimal_places=2, help_text="Base price per 1-hour slot"
     )
     capacity = models.IntegerField(default=14, help_text="Recommended max players")
+    surface_spec = models.CharField(
+        max_length=150,
+        default="50mm FIFA Quality Pro Artificial Turf",
+        help_text="Turf surface specification",
+    )
+    is_fifa_certified = models.BooleanField(
+        default=True, help_text="FIFA certification status"
+    )
+    lighting_spec = models.CharField(
+        max_length=150,
+        default="400 Lux Anti-Glare LED Floodlights",
+        help_text="Lighting specification",
+    )
+    dugout_spec = models.CharField(
+        max_length=150,
+        default="14-Player Shaded Dugout & Tactical Board",
+        help_text="Dugout capacity and amenities",
+    )
+    dimensions = models.CharField(
+        max_length=100,
+        default="110ft x 70ft (7v7 Standard)",
+        help_text="Pitch playing dimensions",
+    )
+    fast_fill_threshold = models.IntegerField(
+        default=4, help_text="Remaining slots threshold for fast-fill badge"
+    )
     facilities = models.ManyToManyField(Facility, blank=True, related_name="turfs")
     images = models.JSONField(default=list, help_text="List of image URLs")
     operating_hours_start = models.TimeField(default="06:00:00")

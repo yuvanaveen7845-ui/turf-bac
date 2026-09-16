@@ -1,179 +1,526 @@
 import io
 import base64
-import jwt
+import hashlib
+import secrets
 import qrcode
 from datetime import datetime, date, timedelta
 from django.conf import settings
 from django.utils import timezone
-from .models import QRTicket, CheckInRecord
+from django.db import transaction
+from .models import QRCredential, CheckIn
 from bookings.models import Booking
-
-QR_SECRET_KEY = getattr(settings, "SECRET_KEY", "ft-qr-secret-key-2026")
 
 
 class QRService:
+    CHECK_IN_OPEN_MINUTES = 30
+    CHECK_IN_GRACE_MINUTES = 30
+
     @classmethod
-    def generate_qr_for_booking(cls, booking):
+    def generate_credential_for_booking(
+        cls, booking, force_regenerate=False, reason="Initial issuance", admin_user=None
+    ):
         """
-        Creates a tamper-proof JWT token and generates a base64 encoded QR image.
-        The token only encodes safe identifiers (booking_id, ticket_code).
+        Generates or refreshes a cryptographically secure, tamper-resistant QR credential
+        with high error correction (Level H), valid window, and hash indexing.
         """
-        # Get or create ticket
-        ticket, created = QRTicket.objects.get_or_create(
-            booking=booking, defaults={"ticket_code": QRTicket.generate_ticket_code()}
-        )
+        # Calculate validity window
+        now = timezone.now()
+        local_tz = timezone.get_current_timezone()
 
-        payload = {
-            "b_id": booking.booking_id,
-            "tkt": ticket.ticket_code,
-            "turf_id": str(booking.turf.id),
-            "date": str(booking.date),
-            "start_time": str(booking.start_time),
-            "end_time": str(booking.end_time),
-            "exp": datetime.utcnow() + timedelta(days=30),
-        }
+        # Combine booking date and start/end time into timezone-aware datetimes
+        start_naive = datetime.combine(booking.date, booking.start_time)
+        end_naive = datetime.combine(booking.date, booking.end_time)
 
-        token = jwt.encode(payload, QR_SECRET_KEY, algorithm="HS256")
-        ticket.jwt_token = token
+        start_dt = timezone.make_aware(start_naive, local_tz)
+        end_dt = timezone.make_aware(end_naive, local_tz)
 
-        # Generate QR code image
+        valid_from = start_dt - timedelta(minutes=cls.CHECK_IN_OPEN_MINUTES)
+        valid_until = end_dt + timedelta(minutes=cls.CHECK_IN_GRACE_MINUTES)
+
+        # Check existing credential
+        credential = getattr(booking, "qr_credential", None)
+
+        if credential and not force_regenerate:
+            # If credential already exists and is active, return it
+            if credential.status == "ACTIVE":
+                return credential
+
+        token = QRCredential.generate_token()
+        token_hash = QRCredential.compute_hash(token)
+
+        # Standards-compliant QR generation with High error correction
         qr = qrcode.QRCode(
-            version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=8,
-            border=2,
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=10,
+            border=3,
         )
+        # Compact opaque verification payload
         qr.add_data(token)
         qr.make(fit=True)
-        img = qr.make_image(fill_color="#064e3b", back_color="white")
+        img = qr.make_image(fill_color="#059669", back_color="white")
 
         buffer = io.BytesIO()
         img.save(buffer, format="PNG")
-        qr_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-        ticket.qr_base64 = f"data:image/png;base64,{qr_b64}"
-        ticket.save()
+        qr_b64 = f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
 
-        return ticket
+        if credential:
+            # Update/Regenerate existing
+            old_version = credential.credential_version
+            credential.credential_token = token
+            credential.credential_hash = token_hash
+            credential.credential_version = old_version + 1
+            credential.status = "ACTIVE"
+            credential.issued_at = now
+            credential.valid_from = valid_from
+            credential.valid_until = valid_until
+            credential.qr_base64 = qr_b64
+            credential.revoked_at = None
+            credential.revocation_reason = ""
+            credential.save()
+        else:
+            credential = QRCredential.objects.create(
+                booking=booking,
+                credential_token=token,
+                credential_hash=token_hash,
+                credential_version=1,
+                status="ACTIVE",
+                issued_at=now,
+                valid_from=valid_from,
+                valid_until=valid_until,
+                qr_base64=qr_b64,
+            )
+
+        return credential
 
     @classmethod
-    def validate_and_checkin(cls, raw_data, staff_user, notes=""):
+    def evaluate_and_checkin(
+        cls,
+        raw_input: str,
+        staff_user,
+        method="QR_SCAN",
+        facility_id=None,
+        override_reason="",
+        is_override=False,
+        device_identifier="",
+    ):
         """
-        Validates scanned QR token or booking ID, verifies all criteria,
-        and performs atomic check-in preventing duplicate entry.
+        Authoritative gate check-in & decision engine.
+        Atomic, idempotent, resistant to concurrent/duplicate scans, and auditable.
         """
-        booking_id = None
-
-        # 1. Try decoding as JWT
-        try:
-            decoded = jwt.decode(raw_data, QR_SECRET_KEY, algorithms=["HS256"])
-            booking_id = decoded.get("b_id")
-        except jwt.PyJWTError:
-            # Fallback: maybe staff entered or scanned the direct booking_id or ticket_code
-            clean_str = raw_data.strip()
-            ticket = QRTicket.objects.filter(ticket_code=clean_str).first()
-            if ticket:
-                booking_id = ticket.booking.booking_id
-            else:
-                booking_id = clean_str
-
-        booking = Booking.objects.filter(booking_id=booking_id).first()
-        if not booking:
+        clean_input = (raw_input or "").strip()
+        if not clean_input:
             return {
-                "status": "INVALID",
-                "title": "Invalid Booking",
-                "message": "No booking found matching this code.",
+                "valid": False,
+                "decision": "DENY",
+                "reason_code": "EMPTY_PAYLOAD",
+                "title": "Invalid Request",
+                "message": "No credential or booking code provided.",
                 "booking": None,
             }
 
-        ticket = getattr(booking, "qr_ticket", None)
+        # 1. Resolve Booking and Credential without leaking internal IDs
+        token_hash = QRCredential.compute_hash(clean_input)
+        credential = QRCredential.objects.filter(
+            credential_hash=token_hash
+        ).select_related("booking", "booking__customer", "booking__turf").first()
 
-        # Check duplicate check-in
-        if booking.status == "CHECKED_IN" or (ticket and ticket.is_used):
-            CheckInRecord.objects.create(
-                booking=booking,
-                scanned_by=staff_user,
-                result="ALREADY_USED",
-                message="Customer has already checked in.",
-                notes=notes,
-            )
-            return {
-                "status": "ALREADY_USED",
-                "title": "Customer Already Checked In",
-                "message": f'This ticket was already used at {booking.checked_in_at.strftime("%I:%M %p, %d %b") if booking.checked_in_at else "Venue"}. Duplicate entry blocked.',
-                "booking": {
-                    "booking_id": booking.booking_id,
-                    "customer_name": booking.customer.full_name,
-                    "turf_name": booking.turf.name,
-                    "date": str(booking.date),
-                    "time": f"{booking.start_time.strftime('%H:%M')} - {booking.end_time.strftime('%H:%M')}",
-                    "checked_in_at": str(booking.checked_in_at),
-                },
-            }
+        if not credential:
+            credential = QRCredential.objects.filter(
+                credential_token=clean_input
+            ).select_related("booking", "booking__customer", "booking__turf").first()
 
-        # Check cancelled / refunded
-        if booking.status in ("CANCELLED", "REFUNDED"):
-            return {
-                "status": "INVALID",
-                "title": "Booking Cancelled",
-                "message": f"This booking was {booking.status.lower()} and is no longer valid.",
-                "booking": {"booking_id": booking.booking_id},
-            }
-
-        # Check date (Grace period: allowed on booking date)
-        today = timezone.now().date()
-        if booking.date < today:
-            return {
-                "status": "EXPIRED",
-                "title": "Booking Expired",
-                "message": f'This booking was for {booking.date.strftime("%d %b %Y")}, which has already passed.',
-                "booking": {"booking_id": booking.booking_id},
-            }
-
-        # Check payment
-        if booking.status == "PAYMENT_PENDING" or booking.balance_due > 0:
-            payment_warning = (
-                f"Notice: Balance due ₹{booking.balance_due}"
-                if booking.balance_due > 0
-                else "Payment is still pending."
-            )
+        booking = None
+        if credential:
+            booking = credential.booking
         else:
-            payment_warning = None
+            # Fallback for manual booking ID entry e.g. FT-20260915-XXXXX
+            booking = Booking.objects.filter(
+                booking_id__iexact=clean_input
+            ).select_related("customer", "turf").first()
+            if booking:
+                credential = getattr(booking, "qr_credential", None)
 
-        # Success: Mark as checked-in
+        if not booking:
+            return {
+                "valid": False,
+                "decision": "DENY",
+                "reason_code": "NOT_FOUND",
+                "title": "Booking Not Found",
+                "message": "No booking matches this QR code or booking reference.",
+                "booking": None,
+            }
+
         now = timezone.now()
-        booking.status = "CHECKED_IN"
-        booking.checked_in_at = now
-        booking.checked_in_by = staff_user
-        booking.save()
+        local_tz = timezone.get_current_timezone()
+        today = timezone.localdate()
 
-        if ticket:
-            ticket.is_used = True
-            ticket.used_at = now
-            ticket.save()
+        # Build booking info payload for UI
+        booking_data = {
+            "booking_id": booking.booking_id,
+            "customer_name": booking.customer.full_name or booking.customer.email,
+            "customer_phone": getattr(booking.customer, "phone", "") or "—",
+            "turf_name": booking.turf.name,
+            "turf_location": booking.turf.location,
+            "surface_spec": getattr(booking.turf, "surface_spec", ""),
+            "date": str(booking.date),
+            "start_time": booking.start_time.strftime("%I:%M %p"),
+            "end_time": booking.end_time.strftime("%I:%M %p"),
+            "booking_type": booking.booking_type,
+            "total_amount": float(booking.final_amount or booking.total_amount),
+            "amount_paid": float(booking.amount_paid),
+            "balance_due": float(booking.balance_due),
+            "payment_status": (
+                "PAID"
+                if booking.balance_due <= 0 and booking.amount_paid > 0
+                else "PARTIAL"
+                if booking.amount_paid > 0
+                else "PENDING"
+            ),
+        }
 
-        CheckInRecord.objects.create(
-            booking=booking,
-            scanned_by=staff_user,
-            result="VALID",
-            message="Booking Verified — Entry Allowed",
-            notes=notes,
-        )
+        # 2. Check Cancellation / Refund
+        if booking.status in ("CANCELLED", "REFUNDED"):
+            CheckIn.objects.create(
+                booking=booking,
+                qr_credential=credential,
+                staff_user=staff_user,
+                turf=booking.turf,
+                check_in_time=now,
+                method=method,
+                decision="DENY",
+                reason_code="BOOKING_CANCELLED",
+                message=f"Booking is {booking.status.lower()}.",
+                override_reason=override_reason,
+                device_identifier=device_identifier,
+            )
+            return {
+                "valid": False,
+                "decision": "DENY",
+                "reason_code": "BOOKING_CANCELLED",
+                "title": "Booking Cancelled",
+                "message": f"This match reservation was {booking.status.lower()} and is not eligible for admission.",
+                "booking": booking_data,
+            }
+
+        # 3. Check Credential Revocation
+        if credential and credential.status == "REVOKED":
+            CheckIn.objects.create(
+                booking=booking,
+                qr_credential=credential,
+                staff_user=staff_user,
+                turf=booking.turf,
+                check_in_time=now,
+                method=method,
+                decision="DENY",
+                reason_code="CREDENTIAL_REVOKED",
+                message="Credential has been revoked.",
+                override_reason=override_reason,
+                device_identifier=device_identifier,
+            )
+            return {
+                "valid": False,
+                "decision": "DENY",
+                "reason_code": "CREDENTIAL_REVOKED",
+                "title": "Pass Revoked",
+                "message": "This digital pass has been revoked by management. Please contact reception.",
+                "booking": booking_data,
+            }
+
+        # 4. Check Date and Operating Time Window (using server timezone)
+        start_naive = datetime.combine(booking.date, booking.start_time)
+        end_naive = datetime.combine(booking.date, booking.end_time)
+        start_dt = timezone.make_aware(start_naive, local_tz)
+        end_dt = timezone.make_aware(end_naive, local_tz)
+
+        checkin_open_dt = start_dt - timedelta(minutes=cls.CHECK_IN_OPEN_MINUTES)
+        checkin_close_dt = end_dt + timedelta(minutes=cls.CHECK_IN_GRACE_MINUTES)
+
+        if booking.date < today and not is_override:
+            CheckIn.objects.create(
+                booking=booking,
+                qr_credential=credential,
+                staff_user=staff_user,
+                turf=booking.turf,
+                check_in_time=now,
+                method=method,
+                decision="DENY",
+                reason_code="EXPIRED",
+                message=f"Booking date {booking.date} has passed.",
+                override_reason=override_reason,
+                device_identifier=device_identifier,
+            )
+            return {
+                "valid": False,
+                "decision": "DENY",
+                "reason_code": "EXPIRED",
+                "title": "Match Date Expired",
+                "message": f"This pass was for {booking.date.strftime('%d %b %Y')}, which has already passed.",
+                "booking": booking_data,
+            }
+
+        if booking.date > today and not is_override:
+            CheckIn.objects.create(
+                booking=booking,
+                qr_credential=credential,
+                staff_user=staff_user,
+                turf=booking.turf,
+                check_in_time=now,
+                method=method,
+                decision="DENY",
+                reason_code="FUTURE_DATE",
+                message=f"Booking is for future date {booking.date}.",
+                override_reason=override_reason,
+                device_identifier=device_identifier,
+            )
+            return {
+                "valid": False,
+                "decision": "DENY",
+                "reason_code": "FUTURE_DATE",
+                "title": "Upcoming Match Date",
+                "message": f"This match is scheduled for {booking.date.strftime('%A, %d %b %Y')}. Gate check-in is not yet open.",
+                "booking": booking_data,
+            }
+
+        # Check Today's Time Window
+        if booking.date == today and not is_override:
+            if now < checkin_open_dt:
+                CheckIn.objects.create(
+                    booking=booking,
+                    qr_credential=credential,
+                    staff_user=staff_user,
+                    turf=booking.turf,
+                    check_in_time=now,
+                    method=method,
+                    decision="DENY",
+                    reason_code="OUTSIDE_CHECKIN_WINDOW",
+                    message="Check-in window not yet open.",
+                    override_reason=override_reason,
+                    device_identifier=device_identifier,
+                )
+                return {
+                    "valid": False,
+                    "decision": "DENY",
+                    "reason_code": "OUTSIDE_CHECKIN_WINDOW",
+                    "title": "Check-In Not Yet Open",
+                    "message": f"Match starts at {booking.start_time.strftime('%I:%M %p')}. Gate admission opens at {checkin_open_dt.strftime('%I:%M %p')} (30 mins prior).",
+                    "booking": booking_data,
+                }
+            elif now > checkin_close_dt:
+                CheckIn.objects.create(
+                    booking=booking,
+                    qr_credential=credential,
+                    staff_user=staff_user,
+                    turf=booking.turf,
+                    check_in_time=now,
+                    method=method,
+                    decision="DENY",
+                    reason_code="EXPIRED",
+                    message="Slot time has concluded.",
+                    override_reason=override_reason,
+                    device_identifier=device_identifier,
+                )
+                return {
+                    "valid": False,
+                    "decision": "DENY",
+                    "reason_code": "EXPIRED",
+                    "title": "Session Concluded",
+                    "message": f"This match session ended at {booking.end_time.strftime('%I:%M %p')}.",
+                    "booking": booking_data,
+                }
+
+        # 5. Facility check if specified
+        if facility_id and str(booking.turf.id) != str(facility_id) and not is_override:
+            return {
+                "valid": False,
+                "decision": "DENY",
+                "reason_code": "WRONG_FACILITY",
+                "title": "Wrong Pitch / Arena",
+                "message": f"This booking is reserved for {booking.turf.name}. You are checking in at a different facility.",
+                "booking": booking_data,
+            }
+
+        # 6. ATOMIC TRANSACTION: Check Duplicate & Perform Admission
+        with transaction.atomic():
+            locked_booking = (
+                Booking.objects.select_for_update()
+                .filter(id=booking.id)
+                .first()
+            )
+
+            # Check if another scanner checked in concurrently
+            if locked_booking.status == "CHECKED_IN" or (
+                credential and credential.status == "USED"
+            ):
+                prior_checkin = (
+                    CheckIn.objects.filter(
+                        booking=locked_booking, decision="ALLOW"
+                    )
+                    .order_by("-check_in_time")
+                    .first()
+                )
+
+                checked_in_time_str = (
+                    prior_checkin.check_in_time.strftime("%I:%M %p")
+                    if prior_checkin
+                    else locked_booking.checked_in_at.strftime("%I:%M %p")
+                    if locked_booking.checked_in_at
+                    else "Earlier"
+                )
+                staff_name = (
+                    prior_checkin.staff_user.get_full_name()
+                    or prior_checkin.staff_user.email
+                    if prior_checkin
+                    else "Staff"
+                )
+
+                # Record denied duplicate scan
+                CheckIn.objects.create(
+                    booking=locked_booking,
+                    qr_credential=credential,
+                    staff_user=staff_user,
+                    turf=locked_booking.turf,
+                    check_in_time=now,
+                    method=method,
+                    decision="DENY",
+                    reason_code="ALREADY_CHECKED_IN",
+                    message=f"Duplicate entry attempt. Already admitted at {checked_in_time_str}.",
+                    override_reason=override_reason,
+                    device_identifier=device_identifier,
+                )
+
+                return {
+                    "valid": False,
+                    "decision": "DENY",
+                    "reason_code": "ALREADY_CHECKED_IN",
+                    "title": "Already Admitted",
+                    "message": f"This match pass was already scanned & admitted at {checked_in_time_str} by {staff_name}. Duplicate entry blocked.",
+                    "booking": booking_data,
+                    "prior_checkin": {
+                        "checked_in_at": checked_in_time_str,
+                        "admitted_by": staff_name,
+                    },
+                }
+
+            # Handle Payment Warnings
+            payment_warning = None
+            if locked_booking.balance_due > 0:
+                payment_warning = f"Balance Due: ₹{locked_booking.balance_due:.0f}. Please collect balance at reception."
+
+            # Mark Booking Checked In
+            locked_booking.status = "CHECKED_IN"
+            locked_booking.checked_in_at = now
+            locked_booking.checked_in_by = staff_user
+            locked_booking.save()
+
+            if credential:
+                credential.status = "USED"
+                credential.checkin_at = now
+                credential.checkin_by = staff_user
+                credential.last_scanned_at = now
+                credential.scan_count += 1
+                credential.save()
+
+            # Record Successful CheckIn
+            checkin_record = CheckIn.objects.create(
+                booking=locked_booking,
+                qr_credential=credential,
+                staff_user=staff_user,
+                turf=locked_booking.turf,
+                check_in_time=now,
+                method=method,
+                decision="ALLOW",
+                reason_code="MANUAL_OVERRIDE" if is_override else "ENTRY_APPROVED",
+                message=(
+                    f"Override Check-In: {override_reason}"
+                    if is_override
+                    else "Entry Verified & Approved"
+                ),
+                override_reason=override_reason,
+                device_identifier=device_identifier,
+            )
 
         return {
-            "status": "VALID",
-            "title": "Booking Verified — Entry Allowed",
-            "message": "Welcome to Friends Turf! Ticket verified successfully.",
+            "valid": True,
+            "decision": "ALLOW",
+            "reason_code": "MANUAL_OVERRIDE" if is_override else "ENTRY_APPROVED",
+            "title": "Entry Approved",
+            "message": f"Welcome to Friends Turf! {booking.turf.name} admission confirmed.",
             "payment_warning": payment_warning,
             "booking": {
-                "booking_id": booking.booking_id,
-                "customer_name": booking.customer.full_name,
-                "customer_phone": booking.customer.phone,
-                "turf_name": booking.turf.name,
-                "date": str(booking.date),
-                "start_time": booking.start_time.strftime("%H:%M"),
-                "end_time": booking.end_time.strftime("%H:%M"),
-                "amount_paid": float(booking.amount_paid),
-                "balance_due": float(booking.balance_due),
+                **booking_data,
+                "status": "CHECKED_IN",
                 "checked_in_at": now.strftime("%I:%M %p"),
+                "admitted_by": staff_user.get_full_name() or staff_user.email,
             },
+            "checkin_id": str(checkin_record.id),
         }
+
+    @classmethod
+    def revoke_credential(cls, booking, reason: str, user):
+        """
+        Revokes an active credential with audit log.
+        """
+        credential = getattr(booking, "qr_credential", None)
+        if not credential:
+            return False
+
+        credential.status = "REVOKED"
+        credential.revoked_at = timezone.now()
+        credential.revocation_reason = reason
+        credential.save()
+        return True
+
+    @classmethod
+    def regenerate_credential(cls, booking, reason: str, user):
+        """
+        Revokes any existing credential and generates a brand new one with updated version.
+        """
+        return cls.generate_credential_for_booking(
+            booking=booking,
+            force_regenerate=True,
+            reason=reason,
+            admin_user=user,
+        )
+
+    @classmethod
+    def get_pass_payload(cls, booking):
+        """
+        Returns full customer match pass payload.
+        """
+        credential = getattr(booking, "qr_credential", None)
+        if not credential or credential.status == "REVOKED":
+            credential = cls.generate_credential_for_booking(booking)
+
+        return {
+            "booking_id": booking.booking_id,
+            "ticket_code": credential.credential_token,
+            "credential_version": credential.credential_version,
+            "status": credential.status,
+            "booking_status": booking.status,
+            "qr_base64": credential.qr_base64,
+            "turf_name": booking.turf.name,
+            "turf_location": booking.turf.location,
+            "surface_spec": getattr(booking.turf, "surface_spec", "FIFA Approved Turf"),
+            "lighting_spec": getattr(booking.turf, "lighting_spec", "500 Lux LED"),
+            "date": str(booking.date),
+            "start_time": booking.start_time.strftime("%H:%M"),
+            "end_time": booking.end_time.strftime("%H:%M"),
+            "customer_name": booking.customer.full_name or booking.customer.email,
+            "customer_phone": getattr(booking.customer, "phone", "") or "",
+            "total_amount": float(booking.final_amount or booking.total_amount),
+            "amount_paid": float(booking.amount_paid),
+            "balance_due": float(booking.balance_due),
+            "valid_from": credential.valid_from.isoformat() if credential.valid_from else None,
+            "valid_until": credential.valid_until.isoformat() if credential.valid_until else None,
+            "is_used": credential.is_used,
+            "checked_in_at": (
+                booking.checked_in_at.strftime("%I:%M %p, %d %b")
+                if booking.checked_in_at
+                else None
+            ),
+        }
+
+    # Backward compatibility aliases
+    generate_qr_for_booking = generate_credential_for_booking
+    validate_and_checkin = evaluate_and_checkin

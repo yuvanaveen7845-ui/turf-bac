@@ -101,7 +101,16 @@ class PricingEngine:
 
     @classmethod
     def calculate_booking_total(
-        cls, turf, date_obj, slot_items, coupon=None, user=None
+        cls,
+        turf,
+        date_obj,
+        slot_items,
+        coupon=None,
+        user=None,
+        manual_override_price=None,
+        manual_discount=None,
+        override_reason="",
+        actor=None,
     ):
         """
         Calculates the complete price breakdown for a booking:
@@ -111,6 +120,7 @@ class PricingEngine:
         - Membership discount
         - Tax amount (GST)
         - Final total
+        - Explicit discounts & manual price overrides (with role authorization)
         """
         total_base = Decimal("0.00")
         total_adjustments = Decimal("0.00")
@@ -147,6 +157,7 @@ class PricingEngine:
             )
 
         subtotal = total_base + total_adjustments
+        discount_sources = []
 
         # Membership discount
         membership_discount = Decimal("0.00")
@@ -165,6 +176,13 @@ class PricingEngine:
                     (subtotal * Decimal("5.00")) / Decimal("100.00"), 2
                 )
 
+        if membership_discount > Decimal("0.00"):
+            discount_sources.append({
+                "source": "MEMBERSHIP",
+                "label": f"Membership Tier ({tier})",
+                "amount": float(membership_discount),
+            })
+
         amount_after_membership = max(Decimal("0.00"), subtotal - membership_discount)
 
         # Coupon discount
@@ -175,13 +193,50 @@ class PricingEngine:
             coupon_discount = Decimal(
                 str(coupon.calculate_discount(amount_after_membership))
             )
+            if coupon_discount > Decimal("0.00"):
+                discount_sources.append({
+                    "source": "COUPON",
+                    "code": coupon.code,
+                    "label": f"Coupon ({coupon.code})",
+                    "amount": float(coupon_discount),
+                })
 
-        discount_amount = membership_discount + coupon_discount
-        taxable_amount = max(Decimal("0.00"), subtotal - discount_amount)
+        # Manual discount with actor permission check
+        admin_discount = Decimal("0.00")
+        if manual_discount:
+            discount_val = Decimal(str(manual_discount))
+            if discount_val > Decimal("0.00"):
+                if actor:
+                    if getattr(actor, "role", "") == "STAFF":
+                        raise ValueError("Staff are not authorized to apply manual discounts.")
+                admin_discount = discount_val
+                discount_sources.append({
+                    "source": "ADMIN_OVERRIDE",
+                    "label": "Admin Approved Discount",
+                    "amount": float(admin_discount),
+                    "reason": override_reason or "Customer accommodation",
+                    "actor": actor.email if actor else "Admin",
+                })
+
+        total_discount = membership_discount + coupon_discount + admin_discount
+        taxable_amount = max(Decimal("0.00"), subtotal - total_discount)
         tax_amount = round(
             (taxable_amount * cls.TAX_RATE_PERCENTAGE) / Decimal("100.00"), 2
         )
-        final_amount = taxable_amount + tax_amount
+        calculated_final = taxable_amount + tax_amount
+
+        # Manual Price Override
+        is_overridden = False
+        original_standard_total = float(calculated_final)
+        final_amount = calculated_final
+
+        if manual_override_price is not None:
+            override_val = Decimal(str(manual_override_price))
+            if actor:
+                if getattr(actor, "role", "") == "STAFF":
+                    raise ValueError("Staff are not authorized to override booking pricing.")
+            final_amount = max(Decimal("0.00"), override_val)
+            is_overridden = True
 
         return {
             "total_base": float(total_base),
@@ -190,10 +245,16 @@ class PricingEngine:
             "membership_discount": float(membership_discount),
             "coupon_code": coupon_code,
             "coupon_discount": float(coupon_discount),
-            "total_discount": float(discount_amount),
+            "admin_discount": float(admin_discount),
+            "total_discount": float(total_discount),
+            "discount_sources": discount_sources,
             "taxable_amount": float(taxable_amount),
             "tax_rate_percent": float(cls.TAX_RATE_PERCENTAGE),
             "tax_amount": float(tax_amount),
             "final_amount": float(final_amount),
+            "original_standard_total": original_standard_total,
+            "is_price_overridden": is_overridden,
+            "override_reason": override_reason if is_overridden else "",
+            "override_actor": actor.email if (is_overridden and actor) else "",
             "slots_breakdown": slots_breakdown,
         }

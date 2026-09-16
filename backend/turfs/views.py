@@ -1,15 +1,56 @@
+import os
+import uuid
 from datetime import datetime, date, timedelta, time
 from decimal import Decimal
 from rest_framework import status, views, permissions, generics
 from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
 
 from .models import Facility, Turf, TimeSlot
 from .serializers import FacilitySerializer, TurfSerializer, TimeSlotSerializer
 from accounts.permissions import IsAdmin, IsStaffOrAdmin
 from pricing.engine import PricingEngine
 from maintenance.models import Maintenance
+
+
+class TurfImageUploadView(views.APIView):
+    permission_classes = [IsAdmin]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request):
+        uploaded_files = request.FILES.getlist("images")
+        if not uploaded_files and "image" in request.FILES:
+            uploaded_files = [request.FILES["image"]]
+
+        if not uploaded_files:
+            base64_data = request.data.get("image_base64")
+            if base64_data:
+                import base64
+                fmt, imgstr = base64_data.split(";base64,") if ";base64," in base64_data else ("", base64_data)
+                ext = fmt.split("/")[-1] if fmt else "jpg"
+                filename = f"turfs/{uuid.uuid4().hex}.{ext}"
+                file_content = ContentFile(base64.b64decode(imgstr))
+                saved_path = default_storage.save(filename, file_content)
+                url = default_storage.url(saved_path)
+                return Response({"urls": [url], "url": url}, status=status.HTTP_201_CREATED)
+            return Response({"error": "No image files provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        urls = []
+        for file_obj in uploaded_files:
+            ext = os.path.splitext(file_obj.name)[1].lower()
+            if ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"]:
+                ext = ".jpg"
+            filename = f"turfs/{uuid.uuid4().hex}{ext}"
+            saved_path = default_storage.save(filename, file_obj)
+            url = default_storage.url(saved_path)
+            urls.append(url)
+
+        return Response({"urls": urls, "url": urls[0] if urls else ""}, status=status.HTTP_201_CREATED)
+
 
 
 class FacilityListView(views.APIView):
@@ -92,6 +133,9 @@ class TurfDetailView(views.APIView):
         )
 
 
+from .services import SchedulingEngine
+
+
 class TurfAvailabilityView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -109,85 +153,62 @@ class TurfAvailabilityView(views.APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # 1. Clean up expired locks first
-        expired_slots = TimeSlot.objects.filter(
-            turf=turf, date=date_obj, status="LOCKED", locked_until__lt=timezone.now()
+        availability_data = SchedulingEngine.get_turf_availability(
+            turf=turf, date_obj=date_obj, user=request.user
         )
-        expired_slots.update(status="AVAILABLE", locked_until=None, locked_by=None)
+        return Response(availability_data)
 
-        # 2. Check existing slots for this date
-        slots = list(
-            TimeSlot.objects.filter(turf=turf, date=date_obj).order_by("start_time")
-        )
 
-        # If no slots exist yet, auto-generate standard slots for the turf's operating hours
-        if not slots:
-            slots = self.generate_daily_slots(turf, date_obj)
+class DailyScheduleView(views.APIView):
+    permission_classes = [permissions.AllowAny]
 
-        # 3. Check for any scheduled maintenance on this date
-        maintenances = Maintenance.objects.filter(
-            turf=turf, date=date_obj, status__in=["SCHEDULED", "IN_PROGRESS"]
-        )
-        maintenance_ranges = [(m.start_time, m.end_time) for m in maintenances]
+    def get(self, request):
+        date_str = request.query_params.get("date")
+        if not date_str:
+            date_obj = timezone.now().date()
+        else:
+            try:
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        # 4. Serialize slots with real-time dynamic pricing
-        serialized_slots = []
-        for slot in slots:
-            # Check if falls under maintenance
-            if any(
-                start <= slot.start_time and end >= slot.end_time
-                for start, end in maintenance_ranges
-            ):
-                if slot.status != "MAINTENANCE":
-                    slot.status = "MAINTENANCE"
-                    slot.save()
+        sport = request.query_params.get("sport_type")
+        turfs_qs = Turf.objects.filter(is_active=True)
+        if sport and sport.upper() != "ALL":
+            turfs_qs = turfs_qs.filter(sport_type=sport.upper())
 
-            price_info = PricingEngine.calculate_slot_price(
-                turf, date_obj, slot.start_time, slot.end_time
+        turfs_data = []
+        for turf in turfs_qs:
+            avail = SchedulingEngine.get_turf_availability(
+                turf=turf, date_obj=date_obj, user=request.user
             )
-            slot_data = TimeSlotSerializer(slot).data
-            slot_data["price"] = price_info["slot_price"]
-            slot_data["base_price"] = price_info["base_price"]
-            slot_data["applied_rules"] = price_info["applied_rules"]
-            serialized_slots.append(slot_data)
+            turfs_data.append(
+                {
+                    "id": str(turf.id),
+                    "name": turf.name,
+                    "slug": turf.slug,
+                    "sport_type": turf.sport_type,
+                    "base_price": float(turf.base_price),
+                    "capacity": turf.capacity,
+                    "dimensions": turf.dimensions,
+                    "surface_spec": turf.surface_spec,
+                    "lighting_spec": turf.lighting_spec,
+                    "is_fifa_certified": turf.is_fifa_certified,
+                    "images": turf.images,
+                    "available_slots_count": avail["available_slots_count"],
+                    "is_fast_fill": avail["is_fast_fill"],
+                    "slots": avail["slots"],
+                }
+            )
 
         return Response(
             {
-                "turf_id": str(turf.id),
-                "turf_name": turf.name,
                 "date": str(date_obj),
-                "base_price": float(turf.base_price),
-                "slots": serialized_slots,
+                "turfs": turfs_data,
             }
         )
 
-    def generate_daily_slots(self, turf, date_obj):
-        created_slots = []
-        cur_time = turf.operating_hours_start
-        end_limit = turf.operating_hours_end
-        duration_minutes = turf.slot_duration_minutes
 
-        # Loop from start to end
-        while True:
-            # calculate slot end time
-            slot_start_dt = datetime.combine(date_obj, cur_time)
-            slot_end_dt = slot_start_dt + timedelta(minutes=duration_minutes)
-            slot_end_time = slot_end_dt.time()
-
-            if slot_end_time > end_limit and slot_end_dt.date() == date_obj:
-                break
-
-            slot, _ = TimeSlot.objects.get_or_create(
-                turf=turf,
-                date=date_obj,
-                start_time=cur_time,
-                end_time=slot_end_time,
-                defaults={"status": "AVAILABLE", "price": turf.base_price},
-            )
-            created_slots.append(slot)
-
-            if slot_end_time >= end_limit or slot_end_dt.date() > date_obj:
-                break
-            cur_time = slot_end_time
-
-        return created_slots

@@ -144,16 +144,22 @@ class Command(BaseCommand):
         # 3. Turfs
         turfs_data = [
             {
-                "name": "The Champions Arena",
+                "name": "Pitch 1 — Champions Football Arena",
                 "slug": "champions-arena",
                 "sport_type": "FOOTBALL",
-                "description": "Premier 7v7 Football & Box Cricket arena with shock-absorbent FIFA quality turf, high-output LED floodlights, and stadium-grade netting.",
-                "location": "Koramangala, Bengaluru",
-                "address": "Plot 42, 80 Feet Road, 4th Block, Koramangala, Bengaluru, Karnataka 560034",
+                "description": "Premier Football pitch at Friends Turf. Equipped with shock-absorbent 50mm turf, high-output anti-glare LED floodlights, and shaded team dugouts.",
+                "location": "Friends Turf, Tiruppur",
+                "address": "Near Sirupooluvapatti, Kamatchepuram, Tiruppur, Tamil Nadu 641603 (RTO Office Backside)",
                 "base_price": Decimal("1400.00"),
                 "capacity": 14,
-                "operating_hours_start": time(6, 0),
-                "operating_hours_end": time(23, 0),
+                "surface_spec": "50mm Monofilament Synthetic Turf",
+                "is_fifa_certified": True,
+                "lighting_spec": "400 Lux Anti-Glare Stadium LED Floodlights",
+                "dugout_spec": "14-Player Shaded Dugout",
+                "dimensions": "110ft x 70ft (7v7 Standard Pitch)",
+                "fast_fill_threshold": 4,
+                "operating_hours_start": time(5, 0),
+                "operating_hours_end": time(23, 59),
                 "slot_duration_minutes": 60,
                 "images": [
                     "https://images.unsplash.com/photo-1575361204480-aadea25e6e68?auto=format&fit=crop&w=1200&q=80",
@@ -162,7 +168,7 @@ class Command(BaseCommand):
                 "rating": Decimal("4.9"),
                 "total_reviews": 38,
                 "facilities": [
-                    "FIFA Artificial Turf",
+                    "Artificial Turf",
                     "Pro Floodlights",
                     "Player Changing Room",
                     "Free Parking",
@@ -171,16 +177,22 @@ class Command(BaseCommand):
                 ],
             },
             {
-                "name": "Legends Box Cricket & Futsal",
+                "name": "Pitch 2 — Legends Box Cricket & Futsal",
                 "slug": "legends-box-cricket",
                 "sport_type": "CRICKET",
-                "description": "Engineered specifically for Box Cricket tournaments and fast 5v5 Futsal games. Features seamless rebound boundary nets and professional pitch bounce.",
-                "location": "Indiranagar, Bengaluru",
-                "address": "12th Main, HAL 2nd Stage, Indiranagar, Bengaluru, Karnataka 560038",
+                "description": "Tournament-spec Box Cricket & Futsal pitch at Friends Turf. Features seamless rebound boundary nets, consistent pitch bounce, and dedicated team dugout.",
+                "location": "Friends Turf, Tiruppur",
+                "address": "Near Sirupooluvapatti, Kamatchepuram, Tiruppur, Tamil Nadu 641603 (RTO Office Backside)",
                 "base_price": Decimal("1200.00"),
                 "capacity": 16,
-                "operating_hours_start": time(6, 0),
-                "operating_hours_end": time(23, 0),
+                "surface_spec": "40mm High-Density Multi-Sport Dual Turf",
+                "is_fifa_certified": True,
+                "lighting_spec": "350 Lux Uniform Overhead Sports Lights",
+                "dugout_spec": "16-Player Team Bench with Kit Storage",
+                "dimensions": "100ft x 60ft (Box Cricket & 5v5 Futsal)",
+                "fast_fill_threshold": 3,
+                "operating_hours_start": time(5, 0),
+                "operating_hours_end": time(23, 59),
                 "slot_duration_minutes": 60,
                 "images": [
                     "https://images.unsplash.com/photo-1531415074968-036ba1b575da?auto=format&fit=crop&w=1200&q=80",
@@ -189,22 +201,28 @@ class Command(BaseCommand):
                 "rating": Decimal("4.8"),
                 "total_reviews": 26,
                 "facilities": [
-                    "FIFA Artificial Turf",
+                    "Artificial Turf",
                     "Pro Floodlights",
-                    "Cricket Bowling Net",
+                    "Cricket Net",
                     "Free Parking",
                     "Clean Washrooms",
                 ],
             },
             {
-                "name": "Strikers Multi-Sport Dome",
+                "name": "Pitch 3 — Strikers Multi-Sport Arena",
                 "slug": "strikers-multi-sport",
                 "sport_type": "MULTI_SPORT",
-                "description": "All-weather covered sports arena suitable for Football, Box Cricket, and Badminton. Fully sheltered from rain and extreme sun.",
-                "location": "HSR Layout, Bengaluru",
-                "address": "Sector 2, 27th Main Road, HSR Layout, Bengaluru, Karnataka 560102",
+                "description": "All-weather sports arena at Friends Turf. Sheltered and floodlit, ideal for Football, Box Cricket, and multi-sport tournaments.",
+                "location": "Friends Turf, Tiruppur",
+                "address": "Near Sirupooluvapatti, Kamatchepuram, Tiruppur, Tamil Nadu 641603 (RTO Office Backside)",
                 "base_price": Decimal("1600.00"),
                 "capacity": 18,
+                "surface_spec": "55mm Cushioned Shockpad Hybrid Turf",
+                "is_fifa_certified": True,
+                "lighting_spec": "500 Lux All-Weather Tournament Illumination",
+                "dugout_spec": "18-Player Air-Cooled Lounge Dugout",
+                "dimensions": "120ft x 80ft (Full Multi-Sport Arena)",
+                "fast_fill_threshold": 5,
                 "operating_hours_start": time(6, 0),
                 "operating_hours_end": time(23, 0),
                 "slot_duration_minutes": 60,
@@ -232,12 +250,16 @@ class Command(BaseCommand):
             turf, created = Turf.objects.get_or_create(
                 slug=t_data["slug"], defaults=t_data
             )
+            if not created:
+                for key, val in t_data.items():
+                    setattr(turf, key, val)
+                turf.save()
             for fn in fac_names:
                 if fn in facility_objs:
                     turf.facilities.add(facility_objs[fn])
             turf_objs.append(turf)
         self.stdout.write(
-            self.style.SUCCESS(f"Created {len(turf_objs)} Turfs with facilities")
+            self.style.SUCCESS(f"Created/Updated {len(turf_objs)} Turfs with facilities")
         )
 
         # 4. Membership Plans

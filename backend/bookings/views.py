@@ -18,6 +18,7 @@ from pricing.engine import PricingEngine
 from promotions.models import Coupon
 from accounts.models import User
 from accounts.permissions import IsStaffOrAdmin, IsAdmin
+from realtime.events import publish_event
 
 
 class PricePreviewView(views.APIView):
@@ -93,6 +94,18 @@ class LockSlotView(views.APIView):
         )
         if not success:
             return Response({"error": result}, status=status.HTTP_409_CONFLICT)
+
+        # Broadcast live slot lock to all connected clients
+        publish_event(
+            channel="slots",
+            event_type="SLOT_LOCKED",
+            payload={
+                "turf_id": str(turf.id),
+                "date": str(data["date"]),
+                "slot_ids": [str(s) for s in data["slot_ids"]],
+                "locked_until": result.get("locked_until") if isinstance(result, dict) else None,
+            },
+        )
 
         return Response(
             {"message": "Slots temporarily reserved for 5 minutes.", "data": result},
@@ -170,6 +183,29 @@ class BookingListCreateView(views.APIView):
                 notes=data.get("notes", ""),
                 participants=data.get("participants", []),
             )
+            # Broadcast booking confirmed
+            publish_event(
+                channel="slots",
+                event_type="BOOKING_CONFIRMED",
+                payload={
+                    "booking_id": booking.booking_id,
+                    "turf_id": str(turf.id),
+                    "date": str(booking.date),
+                    "slot_ids": [str(s.id) for s in booking.slots.all()],
+                    "customer_name": booking.customer.full_name or booking.customer.email,
+                    "amount_paid": float(booking.amount_paid),
+                },
+            )
+            publish_event(
+                channel="operations",
+                event_type="OPERATIONS_UPDATE",
+                payload={
+                    "type": "NEW_BOOKING",
+                    "booking_id": booking.booking_id,
+                    "turf_name": turf.name,
+                    "amount": float(booking.amount_paid),
+                },
+            )
             return Response(
                 BookingSerializer(booking).data, status=status.HTTP_201_CREATED
             )
@@ -217,8 +253,22 @@ class CancelBookingView(views.APIView):
         )
 
         try:
+            slot_ids = [str(s.id) for s in booking.slots.all()]
+            turf_id = str(booking.turf_id)
+            booking_date = str(booking.date)
             updated_booking = BookingEngine.cancel_booking(
                 booking, request.user, reason
+            )
+            # Broadcast slot released
+            publish_event(
+                channel="slots",
+                event_type="SLOT_RELEASED",
+                payload={
+                    "turf_id": turf_id,
+                    "date": booking_date,
+                    "slot_ids": slot_ids,
+                    "booking_id": booking.booking_id,
+                },
             )
             return Response(BookingSerializer(updated_booking).data)
         except ValueError as e:
@@ -296,8 +346,86 @@ class StaffWalkInBookingView(views.APIView):
                 payment_method="CASH",
                 notes=f"Walk-in booked by staff {request.user.email}. {notes}",
             )
+            # Broadcast walk-in confirmed
+            publish_event(
+                channel="slots",
+                event_type="BOOKING_CONFIRMED",
+                payload={
+                    "booking_id": booking.booking_id,
+                    "turf_id": str(turf.id),
+                    "date": str(booking.date),
+                    "slot_ids": [str(s.id) for s in booking.slots.all()],
+                    "customer_name": customer_name,
+                    "amount_paid": float(booking.amount_paid),
+                },
+            )
+            publish_event(
+                channel="operations",
+                event_type="OPERATIONS_UPDATE",
+                payload={
+                    "type": "WALK_IN_CREATED",
+                    "booking_id": booking.booking_id,
+                    "turf_name": turf.name,
+                    "amount": float(booking.amount_paid),
+                },
+            )
             return Response(
                 BookingSerializer(booking).data, status=status.HTTP_201_CREATED
             )
         except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class RecordOfflinePaymentView(views.APIView):
+    """
+    Allows Staff/Admin to quickly record an offline payment (Cash, UPI, Card)
+    against a booking in under 10 seconds.
+    """
+    permission_classes = [IsStaffOrAdmin]
+
+    def post(self, request, identifier):
+        booking = Booking.objects.filter(booking_id=identifier).first()
+        if not booking:
+            booking = get_object_or_404(Booking, pk=identifier)
+
+        amount = request.data.get("amount")
+        payment_method = request.data.get("payment_method", "CASH").upper()
+        reference_id = request.data.get("reference_id", "").strip()
+
+        if not amount:
+            return Response(
+                {"error": "Payment amount is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            payment = BookingEngine.record_offline_payment(
+                booking=booking,
+                amount=amount,
+                payment_method=payment_method,
+                reference_id=reference_id,
+                collected_by=request.user,
+            )
+
+            # Broadcast operations update
+            publish_event(
+                channel="operations",
+                event_type="OPERATIONS_UPDATE",
+                payload={
+                    "type": "PAYMENT_RECORDED",
+                    "booking_id": booking.booking_id,
+                    "amount": float(payment.amount),
+                    "method": payment_method,
+                },
+            )
+
+            return Response(
+                {
+                    "message": f"Payment of ₹{payment.amount} recorded successfully.",
+                    "booking": BookingSerializer(booking).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+

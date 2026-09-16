@@ -19,24 +19,31 @@ def api_root(request):
         }
     })
 
+# Shared API route patterns available under both /api/... and root /...
+api_patterns = [
+    path("auth/", include("accounts.urls")),
+    path("turfs/", include("turfs.urls")),
+    path("bookings/", include("bookings.urls")),
+    path("payments/", include("payments.urls")),
+    path("pricing/", include("pricing.urls")),
+    path("promotions/", include("promotions.urls")),
+    path("memberships/", include("memberships.urls")),
+    path("wallet/", include("wallet.urls")),
+    path("qr/", include("qr_system.urls")),
+    path("reviews/", include("reviews.urls")),
+    path("notifications/", include("notifications.urls")),
+    path("maintenance/", include("maintenance.urls")),
+    path("reports/", include("reports.urls")),
+    path("audit/", include("audit.urls")),
+    path("realtime/", include("realtime.urls")),
+]
+
 urlpatterns = [
     path("", api_root, name="api_root"),
     path("admin/", admin.site.urls),
-    path("api/auth/", include("accounts.urls")),
-    path("api/turfs/", include("turfs.urls")),
-    path("api/bookings/", include("bookings.urls")),
-    path("api/payments/", include("payments.urls")),
-    path("api/pricing/", include("pricing.urls")),
-    path("api/promotions/", include("promotions.urls")),
-    path("api/memberships/", include("memberships.urls")),
-    path("api/wallet/", include("wallet.urls")),
-    path("api/qr/", include("qr_system.urls")),
-    path("api/reviews/", include("reviews.urls")),
-    path("api/notifications/", include("notifications.urls")),
-    path("api/maintenance/", include("maintenance.urls")),
-    path("api/reports/", include("reports.urls")),
-    path("api/audit/", include("audit.urls")),
-    path("api/realtime/", include("realtime.urls")),
+    # Support both /api/<route>/ and /<route>/ for seamless frontend compatibility
+    path("api/", include(api_patterns)),
+    *api_patterns,
 ]
 
 if settings.DEBUG:

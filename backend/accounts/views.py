@@ -719,10 +719,13 @@ class FeatureFlagsView(views.APIView):
 
     def get(self, request):
         from .models import BusinessSetting
-        record = BusinessSetting.objects.filter(key="features").first()
         flags = DEFAULT_FEATURE_FLAGS.copy()
-        if record and isinstance(record.value, dict):
-            flags.update(record.value)
+        try:
+            record = BusinessSetting.objects.filter(key="features").first()
+            if record and isinstance(record.value, dict):
+                flags.update(record.value)
+        except Exception:
+            pass
         return Response(flags)
 
     def put(self, request):

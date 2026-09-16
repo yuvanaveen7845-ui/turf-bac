@@ -408,6 +408,7 @@ class Command(BaseCommand):
 
         # 7. Generate Slots for Today and Next 7 Days
         today = timezone.now().date()
+        new_slots = []
         for offset in range(8):
             day = today + timedelta(days=offset)
             for turf in turf_objs:
@@ -418,15 +419,19 @@ class Command(BaseCommand):
                     end_t = end_dt.time()
                     if end_t > turf.operating_hours_end:
                         break
-                    TimeSlot.objects.get_or_create(
-                        turf=turf,
-                        date=day,
-                        start_time=cur_t,
-                        end_time=end_t,
-                        defaults={"status": "AVAILABLE", "price": turf.base_price},
+                    new_slots.append(
+                        TimeSlot(
+                            turf=turf,
+                            date=day,
+                            start_time=cur_t,
+                            end_time=end_t,
+                            status="AVAILABLE",
+                            price=turf.base_price,
+                        )
                     )
                     cur_t = end_t
 
+        TimeSlot.objects.bulk_create(new_slots, ignore_conflicts=True)
         self.stdout.write(self.style.SUCCESS("Generated slots for next 8 days"))
 
         # 8. Create Realistic Demo Bookings

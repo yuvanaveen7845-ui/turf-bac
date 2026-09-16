@@ -79,13 +79,17 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 if DATABASE_URL:
     import dj_database_url
 
+    is_pooler = "pooler.supabase.com" in DATABASE_URL or ":6543" in DATABASE_URL
+    db_config = dj_database_url.config(
+        default=DATABASE_URL,
+        conn_max_age=0 if is_pooler else 600,
+        conn_health_checks=True,
+        ssl_require=os.environ.get("DB_SSL_REQUIRE", "true").lower() in ("true", "1", "yes"),
+    )
+    if is_pooler:
+        db_config["DISABLE_SERVER_SIDE_CURSORS"] = True
     DATABASES = {
-        "default": dj_database_url.config(
-            default=DATABASE_URL,
-            conn_max_age=600,
-            conn_health_checks=True,
-            ssl_require=os.environ.get("DB_SSL_REQUIRE", "true").lower() in ("true", "1", "yes"),
-        )
+        "default": db_config
     }
 elif os.environ.get("DB_ENGINE") in ("postgres", "postgresql") or os.environ.get("DB_HOST"):
     DATABASES = {

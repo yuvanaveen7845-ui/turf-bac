@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDir: backend
     buildCommand: "pip install -r requirements.txt && python manage.py migrate && python manage.py seed_data"
-    startCommand: "gunicorn friends_turf.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120"
+    startCommand: "gunicorn friends_turf.wsgi:application --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 60"
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.2
@@ -13,9 +13,10 @@ services:
       - key: SECURE_SSL_REDIRECT
         value: "True"
       - key: ALLOWED_HOSTS
-        value: "turf-bac.onrender.com,.onrender.com"
+        value: "*"
       - key: DATABASE_URL
         value: "postgresql://postgres:Friendsturf%4012345@db.tsqskggpbikhgypablih.supabase.co:5432/postgres"
       - key: DB_SSL_REQUIRE
         value: "true"
+
 

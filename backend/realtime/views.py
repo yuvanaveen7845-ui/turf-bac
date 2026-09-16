@@ -30,13 +30,13 @@ def poll_events(request):
         "status": "online"
     })
 
-@api_view(["GET"])
-@permission_classes([AllowAny])
 def stream_events(request):
     """
     Server-Sent Events (SSE) streaming endpoint.
     Keeps an open HTTP connection and pushes events matching requested channels.
     """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
     channels_param = request.GET.get("channels", "")
     channels = [c.strip() for c in channels_param.split(",") if c.strip()] if channels_param else None
 

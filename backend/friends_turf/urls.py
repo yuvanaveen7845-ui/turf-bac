@@ -22,6 +22,8 @@ def api_root(request):
 urlpatterns = [
     path("", api_root, name="api_root"),
     path("admin/", admin.site.urls),
+    
+    # API endpoints (with /api/ prefix)
     path("api/auth/", include("accounts.urls")),
     path("api/turfs/", include("turfs.urls")),
     path("api/bookings/", include("bookings.urls")),
@@ -37,6 +39,23 @@ urlpatterns = [
     path("api/reports/", include("reports.urls")),
     path("api/audit/", include("audit.urls")),
     path("api/realtime/", include("realtime.urls")),
+
+    # Direct aliases (without /api/ prefix) for backward compatibility
+    path("auth/", include("accounts.urls")),
+    path("turfs/", include("turfs.urls")),
+    path("bookings/", include("bookings.urls")),
+    path("payments/", include("payments.urls")),
+    path("pricing/", include("pricing.urls")),
+    path("promotions/", include("promotions.urls")),
+    path("memberships/", include("memberships.urls")),
+    path("wallet/", include("wallet.urls")),
+    path("qr/", include("qr_system.urls")),
+    path("reviews/", include("reviews.urls")),
+    path("notifications/", include("notifications.urls")),
+    path("maintenance/", include("maintenance.urls")),
+    path("reports/", include("reports.urls")),
+    path("audit/", include("audit.urls")),
+    path("realtime/", include("realtime.urls")),
 ]
 
 if settings.DEBUG:

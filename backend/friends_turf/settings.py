@@ -147,6 +147,9 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
+# Proxy SSL Header for Render, Heroku, Cloudflare, AWS load balancers
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
 if cors_origins_env:
     CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
@@ -157,6 +160,7 @@ CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.onrender\.com$",
     r"^https:\/\/.*\.vercel\.app$",
+    r"^https:\/\/.*\.pages\.dev$",
 ]
 
 # CSRF Trusted Origins for HTTPS requests in production
@@ -167,6 +171,8 @@ else:
     CSRF_TRUSTED_ORIGINS = [
         "https://*.onrender.com",
         "https://*.vercel.app",
+        "https://*.pages.dev",
+        "https://turf-fron.pages.dev",
         "http://localhost:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5173",

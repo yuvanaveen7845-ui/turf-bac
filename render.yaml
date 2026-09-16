@@ -7,7 +7,7 @@ services:
     startCommand: "gunicorn friends_turf.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120"
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10.11
+        value: 3.12.2
       - key: DEBUG
         value: "False"
       - key: SECURE_SSL_REDIRECT

@@ -270,21 +270,29 @@ class RegisterView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        serializer = RegisterSerializer(data=request.data)
-        if serializer.is_valid():
-            # Force role to CUSTOMER for public self-registration
-            user = serializer.save()
-            tokens = get_tokens_for_user(user)
-            user_data = UserSerializer(user).data
+        try:
+            serializer = RegisterSerializer(data=request.data)
+            if serializer.is_valid():
+                # Force role to CUSTOMER for public self-registration
+                user = serializer.save()
+                tokens = get_tokens_for_user(user)
+                user_data = UserSerializer(user).data
+                return Response(
+                    {
+                        "message": "Registration successful",
+                        "user": user_data,
+                        "tokens": tokens,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             return Response(
-                {
-                    "message": "Registration successful",
-                    "user": user_data,
-                    "tokens": tokens,
-                },
-                status=status.HTTP_201_CREATED,
+                {"error": "Registration failed", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class LoginView(views.APIView):
@@ -292,22 +300,33 @@ class LoginView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-        if serializer.is_valid():
-            user = serializer.validated_data["user"]
-            user.last_login_at = timezone.now()
-            user.save(update_fields=["last_login_at"])
-            tokens = get_tokens_for_user(user)
-            user_data = UserSerializer(user).data
+        try:
+            serializer = LoginSerializer(data=request.data)
+            if serializer.is_valid():
+                user = serializer.validated_data["user"]
+                try:
+                    user.last_login_at = timezone.now()
+                    user.save(update_fields=["last_login_at"])
+                except Exception:
+                    user.save()
+                tokens = get_tokens_for_user(user)
+                user_data = UserSerializer(user).data
+                return Response(
+                    {
+                        "message": "Login successful",
+                        "user": user_data,
+                        "tokens": tokens,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             return Response(
-                {
-                    "message": "Login successful",
-                    "user": user_data,
-                    "tokens": tokens,
-                },
-                status=status.HTTP_200_OK,
+                {"error": "Login failed", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class CurrentUserView(views.APIView):

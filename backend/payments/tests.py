@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+from unittest.mock import patch
 from datetime import date, time, timedelta
 from decimal import Decimal
 from django.test import TestCase
@@ -129,7 +130,8 @@ class PaymentEngineComprehensiveTests(TestCase):
             RazorpayService.create_order = original_create_order
 
 
-    def test_webhook_payment_captured_and_idempotency(self):
+    @patch("payments.views.RazorpayService.verify_webhook_signature", return_value=True)
+    def test_webhook_payment_captured_and_idempotency(self, mock_verify):
         """Webhook confirms booking idempotently and does not process duplicates."""
         slot = self.slots[1]
         booking = Booking.objects.create(

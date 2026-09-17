@@ -1,5 +1,6 @@
 import os
 import uuid
+import logging
 import requests
 from django.conf import settings
 from django.utils import timezone
@@ -9,6 +10,8 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
+
+logger = logging.getLogger(__name__)
 
 from .models import User, CustomerProfile, StaffProfile, PasswordResetToken
 from .serializers import (
@@ -64,126 +67,165 @@ class GoogleAuthView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        serializer = GoogleAuthSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        credential = serializer.validated_data["credential"]
-
-        # 1. Verify Google ID Token
-        id_info = None
         try:
+            serializer = GoogleAuthSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            credential = serializer.validated_data["credential"]
+
+            # 1. Verify Google ID Token
+            id_info = None
             client_id = getattr(settings, "GOOGLE_CLIENT_ID", "") or None
-            id_info = id_token.verify_oauth2_token(
-                credential, google_requests.Request(), client_id, clock_skew_in_seconds=10
-            )
-        except Exception as e:
-            # Fallback to Google tokeninfo endpoint if local verification encounters client_id mismatch
+
+            # Primary: Verify ID token using google-auth library
             try:
-                resp = requests.get(
-                    f"https://oauth2.googleapis.com/tokeninfo?id_token={credential}",
-                    timeout=5,
+                id_info = id_token.verify_oauth2_token(
+                    credential, google_requests.Request(), client_id, clock_skew_in_seconds=10
                 )
-                if resp.status_code == 200:
-                    id_info = resp.json()
-            except Exception:
-                pass
+            except Exception as auth_err:
+                logger.warning("Primary Google token verification notice: %s", auth_err)
+                # If client_id check caused failure, try without audience check if audience was specified
+                if client_id:
+                    try:
+                        id_info = id_token.verify_oauth2_token(
+                            credential, google_requests.Request(), None, clock_skew_in_seconds=10
+                        )
+                    except Exception:
+                        pass
 
-        if not id_info or "email" not in id_info:
-            return Response(
-                {
-                    "code": "INVALID_GOOGLE_TOKEN",
-                    "detail": "Failed to verify Google authentication token.",
-                },
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
+                # Fallback to Google tokeninfo HTTP endpoint
+                if not id_info:
+                    try:
+                        resp = requests.get(
+                            f"https://oauth2.googleapis.com/tokeninfo?id_token={credential}",
+                            timeout=8,
+                        )
+                        if resp.status_code == 200:
+                            id_info = resp.json()
+                    except Exception as http_err:
+                        logger.warning("Fallback Google tokeninfo request error: %s", http_err)
 
-        google_email = id_info.get("email", "").strip().lower()
-        google_id = id_info.get("sub", "")
-        picture = id_info.get("picture", "")
-        name = id_info.get("name", "")
-        given_name = id_info.get("given_name", "")
-        family_name = id_info.get("family_name", "")
-
-        # 2. Check if user already exists
-        user = User.objects.filter(email__iexact=google_email).first()
-
-        if user:
-            # Existing user: Check account status
-            if user.status in ("SUSPENDED", "DISABLED") or not user.is_active:
-                AuditLog.objects.create(
-                    user=user,
-                    action="SUSPENDED_LOGIN_ATTEMPT",
-                    resource_type="AUTH",
-                    resource_id=user.email,
-                    details={"status": user.status},
-                )
+            if not id_info or "email" not in id_info:
                 return Response(
                     {
-                        "code": "ACCOUNT_SUSPENDED",
-                        "detail": "Your Friends Turf account has been suspended or disabled. Please contact support.",
+                        "code": "INVALID_GOOGLE_TOKEN",
+                        "detail": "Failed to verify Google authentication token.",
                     },
-                    status=status.HTTP_403_FORBIDDEN,
+                    status=status.HTTP_401_UNAUTHORIZED,
                 )
 
-            # Activate user if previously INVITED
-            if user.status == "INVITED":
-                user.status = "ACTIVE"
+            google_email = str(id_info.get("email", "")).strip().lower()
+            google_id = str(id_info.get("sub", "")).strip() or None
+            picture = id_info.get("picture") or ""
+            name = id_info.get("name") or ""
+            given_name = id_info.get("given_name") or ""
+            family_name = id_info.get("family_name") or ""
 
-            # Update Google linking details
-            user.google_id = google_id
-            if picture and not user.profile_image:
-                user.profile_image = picture
-            if not user.first_name and given_name:
-                user.first_name = given_name
-            if not user.last_name and family_name:
-                user.last_name = family_name
-            user.last_login_at = timezone.now()
-            user.save()
+            if not google_email:
+                return Response(
+                    {
+                        "code": "INVALID_GOOGLE_TOKEN",
+                        "detail": "Google authentication token does not contain a valid email address.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-            AuditLog.objects.create(
-                user=user,
-                action="LOGIN_SUCCESS",
-                resource_type="AUTH",
-                resource_id=user.email,
-                details={"provider": "GOOGLE_OAUTH", "role": user.role},
+            # 2. Check if user already exists
+            user = User.objects.filter(email__iexact=google_email).first()
+            if not user and google_id:
+                user = User.objects.filter(google_id=google_id).first()
+
+            if user:
+                # Existing user: Check account status
+                if user.status in ("SUSPENDED", "DISABLED") or not user.is_active:
+                    AuditLog.log(
+                        user=user,
+                        action="SUSPENDED_LOGIN_ATTEMPT",
+                        resource_type="AUTH",
+                        resource_id=user.email,
+                        details={"status": user.status},
+                        request=request,
+                    )
+                    return Response(
+                        {
+                            "code": "ACCOUNT_SUSPENDED",
+                            "detail": "Your Friends Turf account has been suspended or disabled. Please contact support.",
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
+                # Activate user if previously INVITED
+                if user.status == "INVITED":
+                    user.status = "ACTIVE"
+
+                # Update Google linking details
+                if google_id:
+                    user.google_id = google_id
+                if picture and not user.profile_image:
+                    user.profile_image = str(picture)[:500]
+                if not user.first_name and given_name:
+                    user.first_name = str(given_name)[:100]
+                if not user.last_name and family_name:
+                    user.last_name = str(family_name)[:100]
+                user.last_login_at = timezone.now()
+                user.save()
+
+                AuditLog.log(
+                    user=user,
+                    action="LOGIN_SUCCESS",
+                    resource_type="AUTH",
+                    resource_id=user.email,
+                    details={"provider": "GOOGLE_OAUTH", "role": user.role},
+                    request=request,
+                )
+            else:
+                # 3. Auto-provision new customer account
+                first_n = given_name or (name.split(" ")[0] if name else "Customer")
+                last_n = family_name or (" ".join(name.split(" ")[1:]) if name and " " in name else "")
+                user = User.objects.create_user(
+                    email=google_email,
+                    password=None,
+                    first_name=str(first_n)[:100],
+                    last_name=str(last_n)[:100],
+                    profile_image=str(picture)[:500] if picture else "",
+                    role="CUSTOMER",
+                    status="ACTIVE",
+                )
+                if google_id:
+                    user.google_id = google_id
+                user.last_login_at = timezone.now()
+                user.save()
+
+                AuditLog.log(
+                    user=user,
+                    action="CUSTOMER_REGISTERED_GOOGLE",
+                    resource_type="AUTH",
+                    resource_id=user.email,
+                    details={"provider": "GOOGLE_OAUTH", "role": "CUSTOMER"},
+                    request=request,
+                )
+
+            tokens = get_tokens_for_user(user)
+            user_data = UserSerializer(user).data
+
+            return Response(
+                {
+                    "message": "Authentication successful",
+                    "user": user_data,
+                    "tokens": tokens,
+                },
+                status=status.HTTP_200_OK,
             )
-        else:
-            # 3. Auto-provision new customer account
-            first_n = given_name or (name.split(" ")[0] if name else "Customer")
-            last_n = family_name or (" ".join(name.split(" ")[1:]) if name and " " in name else "")
-            user = User.objects.create_user(
-                email=google_email,
-                password=None,
-                first_name=first_n,
-                last_name=last_n,
-                profile_image=picture,
-                role="CUSTOMER",
-                status="ACTIVE",
+        except Exception as exc:
+            logger.exception("Unhandled error in GoogleAuthView: %s", exc)
+            return Response(
+                {
+                    "code": "AUTH_ERROR",
+                    "detail": f"An error occurred during authentication: {str(exc)}",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-            user.google_id = google_id
-            user.last_login_at = timezone.now()
-            user.save()
-
-            AuditLog.objects.create(
-                user=user,
-                action="CUSTOMER_REGISTERED_GOOGLE",
-                resource_type="AUTH",
-                resource_id=user.email,
-                details={"provider": "GOOGLE_OAUTH", "role": "CUSTOMER"},
-            )
-
-        tokens = get_tokens_for_user(user)
-        user_data = UserSerializer(user).data
-
-        return Response(
-            {
-                "message": "Authentication successful",
-                "user": user_data,
-                "tokens": tokens,
-            },
-            status=status.HTTP_200_OK,
-        )
 
 
 class ForgotPasswordView(views.APIView):
@@ -204,12 +246,12 @@ class ForgotPasswordView(views.APIView):
         if user and user.is_active and user.status not in ("SUSPENDED", "DISABLED"):
             token_obj = PasswordResetToken.generate_token_for_user(user, validity_hours=1)
             token_str = token_obj.token
-            AuditLog.objects.create(
+            AuditLog.log(
                 user=user,
                 action="PASSWORD_RESET_REQUESTED",
                 resource_type="AUTH",
                 resource_id=user.email,
-                details={"ip": request.META.get("REMOTE_ADDR")},
+                request=request,
             )
 
         # Uniform response to avoid account enumeration
@@ -251,12 +293,17 @@ class ResetPasswordView(views.APIView):
         token_obj.is_used = True
         token_obj.save(update_fields=["is_used"])
 
-        AuditLog.objects.create(
+        AuditLog.log(
             user=user,
             action="PASSWORD_RESET_COMPLETED",
             resource_type="AUTH",
             resource_id=user.email,
-            details={"ip": request.META.get("REMOTE_ADDR")},
+            request=request,
+        )
+
+        return Response(
+            {"message": "Your password has been reset successfully. You may now log in with your new password."},
+            status=status.HTTP_200_OK,
         )
 
         return Response(

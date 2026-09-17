@@ -1,4 +1,7 @@
 import uuid
+import hashlib
+import secrets
+import re
 from django.db import models
 from django.contrib.auth.models import (
     AbstractBaseUser,
@@ -6,6 +9,7 @@ from django.contrib.auth.models import (
     BaseUserManager,
 )
 from django.utils import timezone
+
 
 
 class UserManager(BaseUserManager):
@@ -91,8 +95,22 @@ class User(AbstractBaseUser, PermissionsMixin):
     def full_name(self):
         return f"{self.first_name} {self.last_name}".strip() or self.email
 
-    def get_full_name(self):
-        return self.full_name
+    @staticmethod
+    def canonicalize_email(email: str) -> str:
+        """Standardize email address to lowercase and trimmed string."""
+        return (email or "").strip().lower()
+
+    @staticmethod
+    def canonicalize_phone(phone: str) -> str:
+        """Standardize Indian phone number to 10-digit clean string or E.164 (+91...)."""
+        clean = re.sub(r"[^\d+]", "", str(phone or "").strip())
+        if clean.startswith("+91") and len(clean) == 13:
+            return clean
+        if clean.startswith("91") and len(clean) == 12:
+            return f"+{clean}"
+        if len(clean) == 10 and clean[0] in "6789":
+            return f"+91{clean}"
+        return clean
 
 
 class CustomerProfile(models.Model):
@@ -152,6 +170,88 @@ class PasswordResetToken(models.Model):
             token=token_str,
             expires_at=expires_at,
         )
+
+
+class PasswordResetOTP(models.Model):
+    """
+    Cryptographic OTP model for Password Reset & Verification.
+    Stores SHA-256 hashed 6-digit OTP code, attempt counter, and single-use session tokens.
+    """
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="password_reset_otps"
+    )
+    otp_hash = models.CharField(max_length=64, db_index=True)
+    reset_token = models.CharField(
+        max_length=64, blank=True, unique=True, null=True, db_index=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+    attempts = models.IntegerField(default=0)
+    max_attempts = models.IntegerField(default=5)
+    is_verified = models.BooleanField(default=False)
+    is_used = models.BooleanField(default=False)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "is_verified", "is_used", "expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"OTP for {self.user.email} [{self.is_verified=}, {self.is_used=}]"
+
+    @staticmethod
+    def hash_otp(otp_code: str) -> str:
+        """Computes SHA-256 cryptographic hash of numeric OTP."""
+        return hashlib.sha256(str(otp_code).strip().encode("utf-8")).hexdigest()
+
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
+
+    def is_locked(self) -> bool:
+        return self.attempts >= self.max_attempts
+
+    def verify_code(self, candidate_otp: str) -> bool:
+        """Verifies candidate 6-digit OTP against stored SHA-256 hash."""
+        if self.is_used or self.is_verified or self.is_expired() or self.is_locked():
+            return False
+        self.attempts += 1
+        candidate_hash = self.hash_otp(candidate_otp)
+        if candidate_hash == self.otp_hash:
+            self.is_verified = True
+            self.reset_token = uuid.uuid4().hex + uuid.uuid4().hex[:16]
+            self.save(update_fields=["attempts", "is_verified", "reset_token"])
+            return True
+        self.save(update_fields=["attempts"])
+        return False
+
+    @classmethod
+    def generate_otp_for_user(
+        cls, user, validity_minutes=10, ip_address=None, user_agent=""
+    ):
+        """
+        Invalidates existing unverified OTPs and generates a fresh 6-digit numeric OTP.
+        Returns a tuple: (otp_instance, raw_6_digit_otp_string).
+        """
+        # Invalidate existing active OTPs
+        cls.objects.filter(user=user, is_used=False).update(is_used=True)
+
+        # Secure 6-digit numeric code
+        raw_code = f"{secrets.randbelow(900000) + 100000}"
+        otp_hash = cls.hash_otp(raw_code)
+        expires_at = timezone.now() + timezone.timedelta(minutes=validity_minutes)
+
+        instance = cls.objects.create(
+            user=user,
+            otp_hash=otp_hash,
+            expires_at=expires_at,
+            ip_address=ip_address,
+            user_agent=user_agent or "",
+        )
+        return instance, raw_code
+
 
 
 class CustomerNote(models.Model):

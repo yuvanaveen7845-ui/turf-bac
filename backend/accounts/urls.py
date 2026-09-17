@@ -14,9 +14,17 @@ from .views import (
     AdminCustomerDetailView,
     AdminCustomerNoteView,
     FeatureFlagsView,
+    CheckUserAvailabilityView,
+    RequestPasswordResetOTPView,
+    VerifyPasswordResetOTPView,
+    ConfirmPasswordResetView,
 )
 
 urlpatterns = [
+    path("check-availability/", CheckUserAvailabilityView.as_view(), name="check_user_availability"),
+    path("password-reset/request-otp/", RequestPasswordResetOTPView.as_view(), name="request_password_reset_otp"),
+    path("password-reset/verify-otp/", VerifyPasswordResetOTPView.as_view(), name="verify_password_reset_otp"),
+    path("password-reset/confirm/", ConfirmPasswordResetView.as_view(), name="confirm_password_reset"),
     path("google/", GoogleAuthView.as_view(), name="google_auth"),
     path("register/", RegisterView.as_view(), name="register"),
     path("login/", LoginView.as_view(), name="login"),
@@ -28,6 +36,7 @@ urlpatterns = [
     path("settings/", BusinessSettingsView.as_view(), name="business_settings"),
     path("customers/", AdminCustomerListView.as_view(), name="admin_customers"),
     path("customers/<str:pk>/", AdminCustomerDetailView.as_view(), name="admin_customer_detail"),
+    path("customers/<str:pk>/crm/", AdminCustomerDetailView.as_view(), name="admin_customer_crm_detail"),
     path("customers/<str:pk>/notes/", AdminCustomerNoteView.as_view(), name="admin_customer_notes"),
     path("customers/<str:pk>/notes/<int:note_id>/", AdminCustomerNoteView.as_view(), name="admin_customer_note_delete"),
     path("admin/customers/", AdminCustomerListView.as_view(), name="admin_customers_legacy"),

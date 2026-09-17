@@ -43,7 +43,7 @@ class Payment(models.Model):
 
     payment_id = models.CharField(max_length=30, unique=True, db_index=True)
     booking = models.ForeignKey(
-        Booking, on_delete=models.CASCADE, related_name="payments"
+        Booking, on_delete=models.CASCADE, related_name="payments", null=True, blank=True
     )
     customer = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="payments"

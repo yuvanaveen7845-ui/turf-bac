@@ -22,6 +22,7 @@ def api_root(request):
 # Shared API route patterns available under both /api/... and root /...
 api_patterns = [
     path("auth/", include("accounts.urls")),
+    path("accounts/", include("accounts.urls")),
     path("turfs/", include("turfs.urls")),
     path("bookings/", include("bookings.urls")),
     path("payments/", include("payments.urls")),

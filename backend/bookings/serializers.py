@@ -2,20 +2,36 @@ from rest_framework import serializers
 from .models import Booking
 from turfs.serializers import TurfSerializer, TimeSlotSerializer
 from accounts.serializers import UserSerializer
-from qr_system.models import QRTicket
+from qr_system.models import QRCredential
+from qr_system.services import QRService
 
 
-class QRTicketSerializer(serializers.ModelSerializer):
+class QRCredentialSerializer(serializers.ModelSerializer):
     class Meta:
-        model = QRTicket
-        fields = ["ticket_code", "qr_base64", "is_used", "used_at"]
+        model = QRCredential
+        fields = ["credential_token", "qr_base64", "status", "valid_from", "valid_until", "checkin_at"]
 
 
 class BookingSerializer(serializers.ModelSerializer):
     turf_details = TurfSerializer(source="turf", read_only=True)
     customer_details = UserSerializer(source="customer", read_only=True)
     slots_data = TimeSlotSerializer(source="slots", many=True, read_only=True)
-    qr_ticket_data = QRTicketSerializer(source="qr_ticket", read_only=True)
+    qr_ticket_data = serializers.SerializerMethodField()
+
+    def get_qr_ticket_data(self, obj):
+        cred = getattr(obj, "qr_credential", None)
+        if not cred and obj.status in ["CONFIRMED", "UPCOMING", "CHECKED_IN"]:
+            cred = QRService.generate_credential_for_booking(obj)
+        if not cred:
+            return None
+        has_balance = float(obj.balance_due) > 0
+        return {
+            "ticket_code": cred.credential_token,
+            "qr_base64": None if has_balance else cred.qr_base64,
+            "qr_locked": has_balance,
+            "is_used": cred.status == "USED" or obj.status == "CHECKED_IN",
+            "status": cred.status,
+        }
 
     class Meta:
         model = Booking

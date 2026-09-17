@@ -30,12 +30,16 @@ def poll_events(request):
         "status": "online"
     })
 
-@api_view(["GET"])
-@permission_classes([AllowAny])
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_GET
+
+@csrf_exempt
+@require_GET
 def stream_events(request):
     """
     Server-Sent Events (SSE) streaming endpoint.
-    Keeps an open HTTP connection and pushes events matching requested channels.
+    Streams events matching requested channels.
+    Bounded generator to prevent blocking single-threaded WSGI workers in development.
     """
     channels_param = request.GET.get("channels", "")
     channels = [c.strip() for c in channels_param.split(",") if c.strip()] if channels_param else None
@@ -50,27 +54,25 @@ def stream_events(request):
             "server_time": last_check,
         }, event_name="open")
 
-        heartbeat_counter = 0
-        while True:
-            time.sleep(0.5)
-            heartbeat_counter += 1
+        # In WSGI environments (like Django runserver), infinite blocking loops lock the entire worker thread.
+        # We run up to 10 cycles of 1-second chunks, then conclude the stream gracefully.
+        # Modern SSE clients (EventSource) automatically reconnect smoothly without thread exhaustion.
+        for _ in range(10):
+            time.sleep(1.0)
             now = time.time()
-            
-            # Fetch any new events since last check
             new_events = get_events_since(last_check, channels)
             if new_events:
                 last_check = now
                 for ev in new_events:
                     yield format_sse(ev, event_name=ev["type"])
-            
-            # Send keep-alive comment ping every 15 seconds (30 cycles of 0.5s)
-            if heartbeat_counter >= 30:
-                heartbeat_counter = 0
-                yield f": heartbeat {now}\n\n"
+            yield f": heartbeat {now}\n\n"
 
     response = StreamingHttpResponse(event_generator(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
+    response["Cache-Control"] = "no-cache, no-transform"
     response["X-Accel-Buffering"] = "no"
+    response["Access-Control-Allow-Origin"] = "*"
+    response["Access-Control-Allow-Credentials"] = "true"
+    response["Access-Control-Allow-Headers"] = "*"
     return response
 
 @api_view(["POST"])

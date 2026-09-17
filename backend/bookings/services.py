@@ -10,6 +10,7 @@ from promotions.models import Coupon, CouponUsage, ReferralReward
 from pricing.engine import PricingEngine
 from qr_system.services import QRService
 from notifications.models import Notification
+from notifications.services import EmailNotificationService
 from wallet.models import WalletTransaction, LoyaltyTransaction
 from audit.models import AuditLog
 
@@ -21,6 +22,7 @@ class BookingEngine:
     def lock_slots(cls, turf, date_obj, slot_ids, user):
         """
         Temporarily locks slots during checkout for 5 minutes with atomic row-level locking.
+        Validates contiguous time slots to ensure accurate match duration without gaps.
         Prevents race conditions and double-booking.
         """
         now = timezone.now()
@@ -36,6 +38,30 @@ class BookingEngine:
 
             if len(slots) != len(slot_ids):
                 return False, "One or more selected slots could not be found."
+
+            # Verify contiguous / consecutive slots for multi-hour bookings
+            if len(slots) > 1:
+                for i in range(len(slots) - 1):
+                    if slots[i].end_time != slots[i + 1].start_time:
+                        return (
+                            False,
+                            f"Selected slots must be consecutive hours ({slots[i].start_time.strftime('%H:%M')}-{slots[i].end_time.strftime('%H:%M')} and {slots[i+1].start_time.strftime('%H:%M')}-{slots[i+1].end_time.strftime('%H:%M')} are not contiguous).",
+                        )
+
+            # Verify past/ongoing slot restrictions
+            current_local = timezone.localtime(timezone.now())
+            current_date = current_local.date()
+            current_time = current_local.time()
+
+            if date_obj < current_date:
+                return False, "Cannot reserve time slots for a past date."
+
+            for slot in slots:
+                if date_obj == current_date and slot.start_time <= current_time:
+                    return (
+                        False,
+                        f"Slot {slot.start_time.strftime('%I:%M %p')} has already started or passed. Please select a future time slot.",
+                    )
 
             # Check all slots are either AVAILABLE or have expired locks
             for slot in slots:
@@ -68,8 +94,37 @@ class BookingEngine:
 
         return True, {
             "locked_until": lock_until.isoformat(),
+            "expires_at": lock_until.isoformat(),
+            "lock_duration_seconds": cls.LOCK_DURATION_MINUTES * 60,
             "slot_ids": [str(s.id) for s in slots],
+            "locked_slots": [
+                {
+                    "id": str(s.id),
+                    "start_time": s.start_time.strftime("%H:%M"),
+                    "end_time": s.end_time.strftime("%H:%M"),
+                    "price": float(s.price),
+                }
+                for s in slots
+            ],
         }
+
+    @classmethod
+    def unlock_slots(cls, turf, date_obj, slot_ids, user):
+        """
+        Explicitly releases temporary slot locks held by the user upon checkout cancellation.
+        """
+        with transaction.atomic():
+            slots = TimeSlot.objects.select_for_update().filter(
+                id__in=slot_ids,
+                turf=turf,
+                date=date_obj,
+                status="LOCKED",
+                locked_by=user,
+            )
+            count = slots.count()
+            if count > 0:
+                slots.update(status="AVAILABLE", locked_until=None, locked_by=None)
+        return count
 
     @classmethod
     def release_expired_locks(cls):
@@ -240,6 +295,12 @@ class BookingEngine:
                 message=f"Your pitch at {turf.name} on {date_obj.strftime('%d %b %Y')} ({start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}) is confirmed.",
                 data={"booking_id": booking.booking_id},
             )
+
+            if b_status == "CONFIRMED":
+                try:
+                    EmailNotificationService.send_booking_confirmation_email(booking)
+                except Exception:
+                    pass
 
             AuditLog.objects.create(
                 user=user,

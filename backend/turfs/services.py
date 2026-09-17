@@ -5,6 +5,7 @@ from django.utils import timezone
 from .models import Turf, TimeSlot
 from pricing.engine import PricingEngine
 from maintenance.models import Maintenance
+from realtime.events import publish_event
 
 
 class SchedulingEngine:
@@ -29,9 +30,20 @@ class SchedulingEngine:
         if date_obj:
             qs = qs.filter(date=date_obj)
 
-        count = qs.count()
+        expired_slots = list(qs)
+        count = len(expired_slots)
         if count > 0:
             qs.update(status="AVAILABLE", locked_until=None, locked_by=None)
+            for s in expired_slots:
+                publish_event(
+                    channel="slots",
+                    event_type="SLOT_RELEASED",
+                    payload={
+                        "turf_id": str(s.turf_id),
+                        "date": str(s.date),
+                        "slot_ids": [str(s.id)],
+                    },
+                )
         return count
 
     @classmethod

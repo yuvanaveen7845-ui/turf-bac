@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     QRValidateScanView,
     QRManualOverrideView,
+    QRCollectBalanceAndAdmitView,
     GetBookingPassView,
     CheckInLogsView,
     CheckInAnalyticsView,
@@ -12,6 +13,7 @@ from .views import (
 urlpatterns = [
     path("scan/", QRValidateScanView.as_view(), name="qr_scan"),
     path("override/", QRManualOverrideView.as_view(), name="qr_override"),
+    path("collect-balance-and-admit/", QRCollectBalanceAndAdmitView.as_view(), name="qr_collect_balance_and_admit"),
     path("pass/<str:booking_id>/", GetBookingPassView.as_view(), name="get_booking_pass"),
     path("logs/", CheckInLogsView.as_view(), name="checkin_logs"),
     path("analytics/", CheckInAnalyticsView.as_view(), name="checkin_analytics"),

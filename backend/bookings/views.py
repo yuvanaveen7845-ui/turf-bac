@@ -108,7 +108,53 @@ class LockSlotView(views.APIView):
         )
 
         return Response(
-            {"message": "Slots temporarily reserved for 5 minutes.", "data": result},
+            {
+                "message": "Slots temporarily reserved for 5 minutes.",
+                "locked_until": result.get("locked_until"),
+                "expires_at": result.get("expires_at"),
+                "lock_duration_seconds": result.get("lock_duration_seconds", 300),
+                "slot_ids": result.get("slot_ids", []),
+                "locked_slots": result.get("locked_slots", []),
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class UnlockSlotView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = LockSlotSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        turf = get_object_or_404(Turf, pk=data["turf_id"])
+
+        released_count = BookingEngine.unlock_slots(
+            turf=turf,
+            date_obj=data["date"],
+            slot_ids=data["slot_ids"],
+            user=request.user,
+        )
+
+        if released_count > 0:
+            publish_event(
+                channel="slots",
+                event_type="SLOT_RELEASED",
+                payload={
+                    "turf_id": str(turf.id),
+                    "date": str(data["date"]),
+                    "slot_ids": [str(s) for s in data["slot_ids"]],
+                },
+            )
+
+        return Response(
+            {
+                "message": f"Successfully released {released_count} slot hold(s).",
+                "released_count": released_count,
+            },
             status=status.HTTP_200_OK,
         )
 

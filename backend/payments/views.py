@@ -24,6 +24,7 @@ from pricing.engine import PricingEngine
 from promotions.models import Coupon, CouponUsage
 from qr_system.services import QRService
 from notifications.models import Notification
+from notifications.services import EmailNotificationService
 from wallet.models import WalletTransaction, LoyaltyTransaction
 from audit.models import AuditLog
 from accounts.permissions import (
@@ -32,6 +33,7 @@ from accounts.permissions import (
     IsStaffOrAdmin,
     CanProcessRefunds,
 )
+from realtime.events import publish_event
 
 
 class CreateRazorpayOrderView(views.APIView):
@@ -82,6 +84,25 @@ class CreateRazorpayOrderView(views.APIView):
 
         # Validate slot availability and locks
         now = timezone.now()
+        local_now = timezone.localtime(now)
+        local_date = local_now.date()
+        local_time = local_now.time()
+
+        if date_obj < local_date:
+            return Response(
+                {"error": "Cannot reserve time slots for a past date."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for slot in slots:
+            if date_obj == local_date and slot.start_time <= local_time:
+                return Response(
+                    {
+                        "error": f"Slot {slot.start_time.strftime('%I:%M %p')} has already started or ended. Please choose an upcoming slot."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         lock_until = now + timezone.timedelta(minutes=5)
 
         for slot in slots:
@@ -361,6 +382,12 @@ class VerifyRazorpayPaymentView(views.APIView):
             data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
         )
 
+        # Dispatch branded Match Pass email via Django SMTP
+        try:
+            EmailNotificationService.send_booking_confirmation_email(booking)
+        except Exception as e:
+            pass
+
         AuditLog.objects.create(
             user=booking.customer,
             action="PAYMENT_VERIFIED",
@@ -381,6 +408,416 @@ class VerifyRazorpayPaymentView(views.APIView):
                 "payment": PaymentSerializer(payment).data,
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class CreateBalanceRazorpayOrderView(views.APIView):
+    """
+    Creates a Razorpay Order specifically for clearing the remaining balance due on a booking.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        booking_id = request.data.get("booking_id")
+        if not booking_id:
+            return Response(
+                {"error": "booking_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        booking = get_object_or_404(Booking, booking_id=booking_id)
+        if request.user.role == "CUSTOMER" and booking.customer != request.user:
+            return Response(
+                {"error": "Unauthorized access to this booking."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if booking.balance_due <= Decimal("0.00"):
+            return Response(
+                {"error": "This booking has no outstanding balance due."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        amount_to_charge = booking.balance_due
+        receipt_id = f"BAL-{booking.booking_id[-8:]}"
+
+        try:
+            rzp_order = RazorpayService.create_order(
+                amount_in_rupees=amount_to_charge,
+                receipt_id=receipt_id,
+                notes={
+                    "type": "BALANCE_PAYMENT",
+                    "booking_id": booking.booking_id,
+                    "customer_id": str(request.user.id),
+                    "turf_name": booking.turf.name,
+                },
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to initialize balance payment gateway: {str(e)}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        payment_id = Payment.generate_payment_id()
+        txn_ref = f"TXN-{uuid.uuid4().hex[:12].upper()}"
+
+        payment = Payment.objects.create(
+            payment_id=payment_id,
+            booking=booking,
+            customer=request.user,
+            provider="RAZORPAY",
+            provider_order_id=rzp_order["order_id"],
+            amount=amount_to_charge,
+            currency="INR",
+            payment_method="UPI",
+            payment_type="BALANCE",
+            transaction_reference=txn_ref,
+            status="PENDING",
+            notes=f"Remaining Balance settlement for booking {booking.booking_id}",
+        )
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="BALANCE_ORDER_CREATED",
+            resource_type="PAYMENT",
+            resource_id=payment.payment_id,
+            details={
+                "order_id": rzp_order["order_id"],
+                "amount": float(amount_to_charge),
+                "booking_id": booking.booking_id,
+            },
+        )
+
+        return Response(
+            {
+                "order_id": rzp_order["order_id"],
+                "amount": rzp_order["amount"],
+                "currency": rzp_order["currency"],
+                "key_id": rzp_order["key_id"],
+                "booking_id": booking.booking_id,
+                "amount_to_pay": float(amount_to_charge),
+                "balance_due": float(booking.balance_due),
+                "payment_id": payment.payment_id,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class VerifyBalanceRazorpayPaymentView(views.APIView):
+    """
+    Verifies Razorpay payment for remaining balance and settles booking balance to zero.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request):
+        razorpay_order_id = request.data.get("razorpay_order_id")
+        razorpay_payment_id = request.data.get("razorpay_payment_id")
+        razorpay_signature = request.data.get("razorpay_signature")
+        booking_id = request.data.get("booking_id")
+
+        if not razorpay_order_id or not razorpay_payment_id or not booking_id:
+            return Response(
+                {"error": "razorpay_order_id, razorpay_payment_id, and booking_id are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        booking = get_object_or_404(Booking, booking_id=booking_id)
+        if request.user.role == "CUSTOMER" and booking.customer != request.user:
+            return Response(
+                {"error": "Unauthorized access to this booking."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        payment = Payment.objects.select_for_update().filter(
+            booking=booking, provider_order_id=razorpay_order_id
+        ).first()
+
+        if not payment:
+            return Response(
+                {"error": "No payment intent found for this order."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if payment.status in ("PAID", "SUCCESSFUL"):
+            return Response(
+                {
+                    "status": "SUCCESS",
+                    "message": "Balance payment was already verified.",
+                    "booking": BookingSerializer(booking).data,
+                    "payment": PaymentSerializer(payment).data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        is_valid = RazorpayService.verify_payment_signature(
+            razorpay_order_id=razorpay_order_id,
+            razorpay_payment_id=razorpay_payment_id,
+            razorpay_signature=razorpay_signature,
+        )
+
+        if not is_valid:
+            payment.status = "FAILED"
+            payment.failure_reason = "Cryptographic signature verification failed."
+            payment.save()
+            return Response(
+                {"error": "Payment signature verification failed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+        payment.status = "PAID"
+        payment.provider_payment_id = razorpay_payment_id
+        payment.provider_signature = razorpay_signature or ""
+        payment.paid_at = now
+        payment.completed_at = now
+        payment.save()
+
+        # Update booking amounts
+        booking.amount_paid += payment.amount
+        booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
+        booking.save()
+
+        # Refresh QR Pass
+        QRService.generate_qr_for_booking(booking)
+
+        Notification.objects.create(
+            user=booking.customer,
+            notification_type="BOOKING_CONFIRMED",
+            title=f"Balance Settle Confirmed ({booking.booking_id})",
+            message=f"Remaining balance of ₹{payment.amount} has been paid via Razorpay. Your match pass is now 100% settled.",
+            data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
+        )
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="BALANCE_PAYMENT_VERIFIED",
+            resource_type="PAYMENT",
+            resource_id=payment.payment_id,
+            details={
+                "provider_payment_id": razorpay_payment_id,
+                "amount": float(payment.amount),
+                "booking_id": booking.booking_id,
+            },
+        )
+
+        publish_event(
+            channel="operations",
+            event_type="OPERATIONS_UPDATE",
+            payload={
+                "type": "BALANCE_PAID",
+                "booking_id": booking.booking_id,
+                "amount": float(payment.amount),
+                "balance_due": float(booking.balance_due),
+            },
+        )
+
+        return Response(
+            {
+                "status": "SUCCESS",
+                "message": "Balance payment verified successfully! Booking is fully paid.",
+                "booking": BookingSerializer(booking).data,
+                "payment": PaymentSerializer(payment).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class WalletBookingPaymentView(views.APIView):
+    """
+    Instant 1-Click checkout using Turf Cash Wallet balance:
+    - Atomically checks customer wallet balance
+    - Debits wallet and creates WalletTransaction record
+    - Creates Payment record (PAID, provider=WALLET)
+    - Confirms booking and generates Match Pass
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request):
+        turf_id = request.data.get("turf_id")
+        date_str = request.data.get("date")
+        slot_ids = request.data.get("slot_ids", [])
+        coupon_code = request.data.get("coupon_code", "").strip()
+        notes = request.data.get("notes", "")
+
+        if not turf_id or not date_str or not slot_ids:
+            return Response(
+                {"error": "turf_id, date, and slot_ids are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        turf = get_object_or_404(Turf, pk=turf_id)
+        try:
+            date_obj = timezone.datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"error": "Invalid date format. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        slots = list(
+            TimeSlot.objects.filter(id__in=slot_ids, turf=turf, date=date_obj).order_by("start_time")
+        )
+        if len(slots) != len(slot_ids):
+            return Response(
+                {"error": "One or more selected slots are invalid."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for slot in slots:
+            if slot.status == "BOOKED":
+                return Response(
+                    {"error": f"Slot {slot.start_time.strftime('%H:%M')} is already booked."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if slot.status == "MAINTENANCE":
+                return Response(
+                    {"error": f"Slot {slot.start_time.strftime('%H:%M')} is under maintenance."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if slot.status == "LOCKED" and not slot.is_lock_expired() and slot.locked_by != request.user:
+                return Response(
+                    {"error": f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+        # Price calculation
+        coupon = None
+        if coupon_code:
+            coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
+
+        slot_items = [{"start_time": s.start_time, "end_time": s.end_time} for s in slots]
+        price_data = PricingEngine.calculate_booking_total(
+            turf=turf,
+            date_obj=date_obj,
+            slot_items=slot_items,
+            coupon=coupon,
+            user=request.user,
+        )
+
+        final_amt = Decimal(str(price_data["final_amount"]))
+
+        # Check wallet balance
+        if not hasattr(request.user, "customer_profile"):
+            return Response(
+                {"error": "Customer wallet profile not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        prof = request.user.customer_profile
+        if prof.wallet_balance < final_amt:
+            return Response(
+                {
+                    "error": f"Insufficient wallet balance (₹{prof.wallet_balance}). Required: ₹{final_amt}."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Debit wallet atomically
+        prof.wallet_balance -= final_amt
+        prof.save()
+
+        booking_id = Booking.generate_booking_id(date_obj)
+        booking = Booking.objects.create(
+            booking_id=booking_id,
+            customer=request.user,
+            turf=turf,
+            date=date_obj,
+            start_time=slots[0].start_time,
+            end_time=slots[-1].end_time,
+            booking_type="REGULAR",
+            status="CONFIRMED",
+            total_amount=Decimal(str(price_data["subtotal"])),
+            discount_amount=Decimal(str(price_data["total_discount"])),
+            tax_amount=Decimal(str(price_data["tax_amount"])),
+            final_amount=final_amt,
+            amount_paid=final_amt,
+            balance_due=Decimal("0.00"),
+            coupon_code=coupon.code if coupon else "",
+            pricing_breakdown=price_data,
+            notes=notes,
+        )
+
+        for slot in slots:
+            slot.status = "BOOKED"
+            slot.locked_until = None
+            slot.locked_by = None
+            slot.booking_id = booking.booking_id
+            slot.save()
+            booking.slots.add(slot)
+
+        payment_id = Payment.generate_payment_id()
+        txn_ref = f"WAL-{uuid.uuid4().hex[:10].upper()}"
+        payment = Payment.objects.create(
+            payment_id=payment_id,
+            booking=booking,
+            customer=request.user,
+            provider="WALLET",
+            amount=final_amt,
+            currency="INR",
+            payment_method="WALLET",
+            payment_type="FULL",
+            transaction_reference=txn_ref,
+            status="PAID",
+            paid_at=timezone.now(),
+            completed_at=timezone.now(),
+            notes="1-Click Instant Turf Cash Wallet Checkout",
+        )
+
+        WalletTransaction.objects.create(
+            customer=request.user,
+            amount=final_amt,
+            transaction_type="DEBIT",
+            source="BOOKING",
+            reference_id=booking.booking_id,
+            description=f"Slot Booking at {turf.name} ({booking.booking_id})",
+            balance_after=prof.wallet_balance,
+        )
+
+        if coupon:
+            coupon.usage_count += 1
+            coupon.save()
+            CouponUsage.objects.create(
+                coupon=coupon,
+                user=booking.customer,
+                booking=booking,
+                discount_applied=booking.discount_amount,
+            )
+
+        QRService.generate_qr_for_booking(booking)
+
+        Notification.objects.create(
+            user=booking.customer,
+            notification_type="BOOKING_CONFIRMED",
+            title=f"Instant Match Pass Confirmed! ({booking.booking_id})",
+            message=f"₹{final_amt} debited from Turf Cash Wallet. Your pitch at {turf.name} is confirmed!",
+            data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
+        )
+
+        # Dispatch branded Match Pass email via Django SMTP
+        try:
+            EmailNotificationService.send_booking_confirmation_email(booking)
+        except Exception as e:
+            pass
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="WALLET_BOOKING_COMPLETED",
+            resource_type="BOOKING",
+            resource_id=booking.booking_id,
+            details={"amount": float(final_amt), "payment_id": payment.payment_id},
+        )
+
+        return Response(
+            {
+                "status": "SUCCESS",
+                "message": "Booking confirmed instantly with Turf Cash Wallet!",
+                "booking": BookingSerializer(booking).data,
+                "payment": PaymentSerializer(payment).data,
+                "new_wallet_balance": float(prof.wallet_balance),
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 
@@ -436,19 +873,30 @@ class RazorpayWebhookView(views.APIView):
                     payment.completed_at = timezone.now()
                     payment.save()
 
-                    booking = payment.booking
-                    booking.amount_paid += amount
-                    booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
-                    booking.status = "CONFIRMED"
-                    booking.save()
+                    if payment.booking:
+                        booking = payment.booking
+                        booking.amount_paid += amount
+                        booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
+                        booking.status = "CONFIRMED"
+                        booking.save()
 
-                    for slot in booking.slots.all():
-                        slot.status = "BOOKED"
-                        slot.locked_until = None
-                        slot.locked_by = None
-                        slot.save()
+                        for slot in booking.slots.all():
+                            slot.status = "BOOKED"
+                            slot.locked_until = None
+                            slot.locked_by = None
+                            slot.save()
 
-                    QRService.generate_qr_for_booking(booking)
+                        QRService.generate_qr_for_booking(booking)
+                        try:
+                            EmailNotificationService.send_booking_confirmation_email(booking)
+                        except Exception as e:
+                            pass
+                    elif payment.customer:
+                        # Wallet top-up
+                        customer_profile = getattr(payment.customer, "customer_profile", None)
+                        if customer_profile:
+                            customer_profile.wallet_balance += amount
+                            customer_profile.save()
 
             elif event == "payment.failed":
                 payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
@@ -793,6 +1241,10 @@ class ManualCollectPaymentView(views.APIView):
 
         # Generate QR match pass if eligible
         QRService.generate_qr_for_booking(booking)
+        try:
+            EmailNotificationService.send_booking_confirmation_email(booking)
+        except Exception as e:
+            pass
 
         AuditLog.objects.create(
             user=request.user,
@@ -806,6 +1258,17 @@ class ManualCollectPaymentView(views.APIView):
                 "reference": txn_ref,
                 "staff": request.user.email,
                 "remaining_balance": float(booking.balance_due),
+            },
+        )
+
+        publish_event(
+            channel="operations",
+            event_type="OPERATIONS_UPDATE",
+            payload={
+                "type": "BALANCE_PAID",
+                "booking_id": booking.booking_id,
+                "amount": float(amount),
+                "balance_due": float(booking.balance_due),
             },
         )
 

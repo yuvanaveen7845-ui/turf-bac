@@ -119,6 +119,28 @@ class QRService:
                 "booking": None,
             }
 
+        # Handle JSON payload if scanned from modern QR format
+        if clean_input.startswith("{") and clean_input.endswith("}"):
+            try:
+                import json
+                parsed_json = json.loads(clean_input)
+                clean_input = (
+                    parsed_json.get("token")
+                    or parsed_json.get("qr_data")
+                    or parsed_json.get("booking_id")
+                    or clean_input
+                ).strip()
+            except Exception:
+                pass
+
+        # Handle scanned URLs e.g. http://localhost:5173/confirmation/FT-20260915-ABCD1
+        if "://" in clean_input or ("/" in clean_input and not clean_input.startswith("FT-")):
+            clean_input = clean_input.rstrip("/").split("/")[-1].strip()
+
+        # Handle leading hash e.g. #FT-20260915-ABCD1
+        if clean_input.startswith("#"):
+            clean_input = clean_input.lstrip("#").strip()
+
         # 1. Resolve Booking and Credential without leaking internal IDs
         token_hash = QRCredential.compute_hash(clean_input)
         credential = QRCredential.objects.filter(
@@ -127,7 +149,7 @@ class QRService:
 
         if not credential:
             credential = QRCredential.objects.filter(
-                credential_token=clean_input
+                credential_token__iexact=clean_input
             ).select_related("booking", "booking__customer", "booking__turf").first()
 
         booking = None
@@ -147,7 +169,7 @@ class QRService:
                 "decision": "DENY",
                 "reason_code": "NOT_FOUND",
                 "title": "Booking Not Found",
-                "message": "No booking matches this QR code or booking reference.",
+                "message": f"No booking matches '{clean_input}'. Please check the reference code.",
                 "booking": None,
             }
 
@@ -360,13 +382,17 @@ class QRService:
                     .first()
                 )
 
-                checked_in_time_str = (
-                    prior_checkin.check_in_time.strftime("%I:%M %p")
+                prior_time = (
+                    prior_checkin.check_in_time
                     if prior_checkin
-                    else locked_booking.checked_in_at.strftime("%I:%M %p")
-                    if locked_booking.checked_in_at
-                    else "Earlier"
+                    else locked_booking.checked_in_at
                 )
+                if prior_time:
+                    local_time = timezone.localtime(prior_time) if timezone.is_aware(prior_time) else prior_time
+                    checked_in_time_str = local_time.strftime("%I:%M %p")
+                else:
+                    checked_in_time_str = "Earlier"
+
                 staff_name = (
                     prior_checkin.staff_user.get_full_name()
                     or prior_checkin.staff_user.email
@@ -402,10 +428,35 @@ class QRService:
                     },
                 }
 
-            # Handle Payment Warnings
+            # Handle Outstanding Balance Due before Gate Admission
+            if locked_booking.balance_due > 0 and not is_override:
+                CheckIn.objects.create(
+                    booking=locked_booking,
+                    qr_credential=credential,
+                    staff_user=staff_user,
+                    turf=locked_booking.turf,
+                    check_in_time=now,
+                    method=method,
+                    decision="DENY",
+                    reason_code="BALANCE_DUE",
+                    message=f"Outstanding balance of ₹{locked_booking.balance_due:.0f} required before gate admission.",
+                    override_reason=override_reason,
+                    device_identifier=device_identifier,
+                )
+                return {
+                    "valid": False,
+                    "decision": "DENY",
+                    "reason_code": "BALANCE_DUE",
+                    "title": "Balance Payment Required",
+                    "message": f"This match pass has an outstanding balance of ₹{locked_booking.balance_due:.0f}. Please collect payment before gate admission.",
+                    "balance_due": float(locked_booking.balance_due),
+                    "amount_paid": float(locked_booking.amount_paid),
+                    "total_amount": float(locked_booking.final_amount or locked_booking.total_amount),
+                    "booking": booking_data,
+                    "can_collect_balance": True,
+                }
+
             payment_warning = None
-            if locked_booking.balance_due > 0:
-                payment_warning = f"Balance Due: ₹{locked_booking.balance_due:.0f}. Please collect balance at reception."
 
             # Mark Booking Checked In
             locked_booking.status = "CHECKED_IN"
@@ -443,6 +494,10 @@ class QRService:
         return {
             "valid": True,
             "decision": "ALLOW",
+            "status": "ADMITTED",
+            "booking_id": booking.booking_id,
+            "customer_name": booking_data["customer_name"],
+            "turf_name": booking_data["turf_name"],
             "reason_code": "MANUAL_OVERRIDE" if is_override else "ENTRY_APPROVED",
             "title": "Entry Approved",
             "message": f"Welcome to Friends Turf! {booking.turf.name} admission confirmed.",
@@ -450,7 +505,7 @@ class QRService:
             "booking": {
                 **booking_data,
                 "status": "CHECKED_IN",
-                "checked_in_at": now.strftime("%I:%M %p"),
+                "checked_in_at": timezone.localtime(now).strftime("%I:%M %p"),
                 "admitted_by": staff_user.get_full_name() or staff_user.email,
             },
             "checkin_id": str(checkin_record.id),
@@ -492,13 +547,24 @@ class QRService:
         if not credential or credential.status == "REVOKED":
             credential = cls.generate_credential_for_booking(booking)
 
+        has_balance = float(booking.balance_due) > 0
+        qr_locked = has_balance
+        qr_image = None if qr_locked else (credential.qr_base64 if credential else None)
+
         return {
             "booking_id": booking.booking_id,
-            "ticket_code": credential.credential_token,
-            "credential_version": credential.credential_version,
-            "status": credential.status,
+            "ticket_code": credential.credential_token if credential else "",
+            "credential_version": credential.credential_version if credential else 1,
+            "status": "DEPOSIT_CONFIRMED" if qr_locked else (credential.status if credential else "ACTIVE"),
             "booking_status": booking.status,
-            "qr_base64": credential.qr_base64,
+            "qr_locked": qr_locked,
+            "lock_reason": (
+                f"Deposit of ₹{float(booking.amount_paid):.0f} received. Remaining balance of ₹{float(booking.balance_due):.0f} must be settled to activate gate match pass."
+                if qr_locked
+                else None
+            ),
+            "payment_status": "PARTIAL" if has_balance else "PAID",
+            "qr_base64": qr_image,
             "turf_name": booking.turf.name,
             "turf_location": booking.turf.location,
             "surface_spec": getattr(booking.turf, "surface_spec", "FIFA Approved Turf"),
@@ -511,11 +577,11 @@ class QRService:
             "total_amount": float(booking.final_amount or booking.total_amount),
             "amount_paid": float(booking.amount_paid),
             "balance_due": float(booking.balance_due),
-            "valid_from": credential.valid_from.isoformat() if credential.valid_from else None,
-            "valid_until": credential.valid_until.isoformat() if credential.valid_until else None,
-            "is_used": credential.is_used,
+            "valid_from": credential.valid_from.isoformat() if (credential and credential.valid_from) else None,
+            "valid_until": credential.valid_until.isoformat() if (credential and credential.valid_until) else None,
+            "is_used": credential.is_used if credential else False,
             "checked_in_at": (
-                booking.checked_in_at.strftime("%I:%M %p, %d %b")
+                (timezone.localtime(booking.checked_in_at) if timezone.is_aware(booking.checked_in_at) else booking.checked_in_at).strftime("%I:%M %p, %d %b")
                 if booking.checked_in_at
                 else None
             ),

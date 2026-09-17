@@ -42,9 +42,10 @@ api_patterns = [
 urlpatterns = [
     path("", api_root, name="api_root"),
     path("admin/", admin.site.urls),
-    # Support both /api/<route>/ and /<route>/ for seamless frontend compatibility
+    
+    # API endpoints under both /api/... and direct /...
     path("api/", include(api_patterns)),
-    *api_patterns,
+    path("", include(api_patterns)),
 ]
 
 if settings.DEBUG:

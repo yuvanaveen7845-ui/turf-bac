@@ -147,16 +147,28 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
+# Proxy SSL Header for Render, Heroku, Cloudflare, AWS load balancers
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
 if cors_origins_env:
     CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
-    CORS_ALLOW_ALL_ORIGINS = False
 else:
-    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = [
+        "https://turf-fron.pages.dev",
+        "https://friendsturf.com",
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+    ]
+
+CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.onrender\.com$",
     r"^https:\/\/.*\.vercel\.app$",
+    r"^https:\/\/.*\.pages\.dev$",
 ]
 
 # CSRF Trusted Origins for HTTPS requests in production
@@ -167,6 +179,8 @@ else:
     CSRF_TRUSTED_ORIGINS = [
         "https://*.onrender.com",
         "https://*.vercel.app",
+        "https://*.pages.dev",
+        "https://turf-fron.pages.dev",
         "http://localhost:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5173",
@@ -174,6 +188,8 @@ else:
     ]
 
 # Production Security Configurations
+SECURE_CROSS_ORIGIN_OPENER_POLICY = os.getenv("SECURE_CROSS_ORIGIN_OPENER_POLICY", "same-origin-allow-popups")
+
 if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
@@ -225,4 +241,36 @@ default_email_backend = (
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", default_email_backend).strip()
 
 
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[%(asctime)s] %(levelname)s %(name)s (line %(lineno)d): %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+    },
+}
 

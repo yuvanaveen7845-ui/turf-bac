@@ -41,11 +41,14 @@ def stream_events(request):
     Streams events matching requested channels.
     Bounded generator to prevent blocking single-threaded WSGI workers in development.
     """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
     channels_param = request.GET.get("channels", "")
     channels = [c.strip() for c in channels_param.split(",") if c.strip()] if channels_param else None
 
     def event_generator():
         last_check = time.time()
+        start_time = time.time()
         # Initial greeting event
         yield format_sse({
             "type": "CONNECTION_ESTABLISHED",
@@ -65,6 +68,11 @@ def stream_events(request):
                 last_check = now
                 for ev in new_events:
                     yield format_sse(ev, event_name=ev["type"])
+            
+            # Send keep-alive comment ping every 5 seconds (10 cycles of 0.5s)
+            if heartbeat_counter >= 10:
+                heartbeat_counter = 0
+                yield f": heartbeat {now}\n\n"
             yield f": heartbeat {now}\n\n"
 
     response = StreamingHttpResponse(event_generator(), content_type="text/event-stream")

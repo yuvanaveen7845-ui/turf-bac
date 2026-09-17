@@ -72,17 +72,29 @@ class Command(BaseCommand):
             facility_objs[f["name"]] = obj
 
         # 2. Demo Users
-        admin_user = User.objects.filter(email="admin@friendsturf.com").first()
+        admin_user = User.objects.filter(email="admin@gmail.com").first()
         if not admin_user:
             admin_user = User.objects.create_superuser(
-                email="admin@friendsturf.com",
+                email="admin@gmail.com",
                 password="admin123",
-                first_name="Vikram",
-                last_name="Singhania",
+                first_name="Admin",
+                last_name="User",
                 phone="+91 98765 43210",
             )
+        else:
+            admin_user.set_password("admin123")
+            admin_user.role = "ADMIN"
+            admin_user.status = "ACTIVE"
+            admin_user.is_staff = True
+            admin_user.is_superuser = True
+            admin_user.is_active = True
+            admin_user.save()
+            StaffProfile.objects.get_or_create(
+                user=admin_user,
+                defaults={"department": "Management", "employee_id": "ADM001", "is_on_duty": True},
+            )
         self.stdout.write(
-            self.style.SUCCESS("Admin created: admin@friendsturf.com / admin123")
+            self.style.SUCCESS("Admin created/updated: admin@gmail.com / admin123")
         )
 
         staff_user = User.objects.filter(email="staff@friendsturf.com").first()

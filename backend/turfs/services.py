@@ -49,7 +49,7 @@ class SchedulingEngine:
     @classmethod
     def generate_daily_slots(cls, turf, date_obj):
         """
-        Generates standard time slots for a turf on a given date based on:
+        Generates standard time slots for a turf on a given date in a single bulk operation based on:
         - turf.operating_hours_start (default 06:00)
         - turf.operating_hours_end (default 23:00)
         - turf.slot_duration_minutes (default 60 mins)
@@ -58,7 +58,7 @@ class SchedulingEngine:
         end_limit = turf.operating_hours_end
         duration_minutes = turf.slot_duration_minutes or 60
 
-        created_slots = []
+        new_slots = []
         while True:
             slot_start_dt = datetime.combine(date_obj, cur_time)
             slot_end_dt = slot_start_dt + timedelta(minutes=duration_minutes)
@@ -67,30 +67,37 @@ class SchedulingEngine:
             if slot_end_time > end_limit and slot_end_dt.date() == date_obj:
                 break
 
-            slot, _ = TimeSlot.objects.get_or_create(
-                turf=turf,
-                date=date_obj,
-                start_time=cur_time,
-                end_time=slot_end_time,
-                defaults={"status": "AVAILABLE", "price": turf.base_price},
+            new_slots.append(
+                TimeSlot(
+                    turf=turf,
+                    date=date_obj,
+                    start_time=cur_time,
+                    end_time=slot_end_time,
+                    status="AVAILABLE",
+                    price=turf.base_price,
+                )
             )
-            created_slots.append(slot)
 
             if slot_end_time >= end_limit or slot_end_dt.date() > date_obj:
                 break
             cur_time = slot_end_time
 
-        return created_slots
+        if new_slots:
+            TimeSlot.objects.bulk_create(new_slots, ignore_conflicts=True)
+
+        return list(
+            TimeSlot.objects.filter(turf=turf, date=date_obj).order_by("start_time")
+        )
 
     @classmethod
-    def get_turf_availability(cls, turf, date_obj, user=None):
+    def get_turf_availability(cls, turf, date_obj, user=None, pricing_context=None):
         """
         Computes the complete, authoritative availability of slots for a turf on date_obj.
         Accounts for:
         - Expired lock cleanup
-        - Slot generation if missing
+        - Slot generation if missing (bulk)
         - Maintenance blackout periods
-        - Real-time dynamic pricing per slot
+        - Real-time dynamic pricing per slot (batched pricing context)
         - Attached booking information for staff/admin users
         """
         # 1. Clean up expired locks first
@@ -137,7 +144,13 @@ class SchedulingEngine:
 
         from .serializers import TimeSlotSerializer
 
+        if pricing_context is None:
+            pricing_context = PricingEngine.get_pricing_context(turf, date_obj)
+
         serialized_slots = []
+        slots_to_update = []
+        now_dt = timezone.now()
+
         for slot in slots:
             # Sync maintenance status
             is_in_maintenance = any(
@@ -146,15 +159,14 @@ class SchedulingEngine:
             )
             if is_in_maintenance and slot.status != "MAINTENANCE":
                 slot.status = "MAINTENANCE"
-                slot.save()
+                slots_to_update.append(slot)
             elif not is_in_maintenance and slot.status == "MAINTENANCE":
-                # Maintenance ended
                 slot.status = "AVAILABLE"
-                slot.save()
+                slots_to_update.append(slot)
 
-            # Dynamic price calculation
+            # Dynamic price calculation with preloaded pricing context (0 extra DB queries)
             price_info = PricingEngine.calculate_slot_price(
-                turf, date_obj, slot.start_time, slot.end_time
+                turf, date_obj, slot.start_time, slot.end_time, pricing_context=pricing_context
             )
 
             slot_data = TimeSlotSerializer(slot).data
@@ -166,6 +178,9 @@ class SchedulingEngine:
                 slot_data["booking_info"] = booking_map[slot.booking_id]
 
             serialized_slots.append(slot_data)
+
+        if slots_to_update:
+            TimeSlot.objects.bulk_update(slots_to_update, ["status"])
 
         available_count = sum(1 for s in serialized_slots if s.get("is_available"))
         is_fast_fill = available_count <= turf.fast_fill_threshold

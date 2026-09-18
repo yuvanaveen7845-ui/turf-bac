@@ -1,5 +1,6 @@
 from datetime import datetime, time
 from decimal import Decimal
+from django.db.models import Q
 from django.utils import timezone
 from .models import PricingRule, Holiday, SpecialEvent
 
@@ -8,7 +9,30 @@ class PricingEngine:
     TAX_RATE_PERCENTAGE = Decimal("18.00")  # Standard 18% GST
 
     @classmethod
-    def calculate_slot_price(cls, turf, date_obj, start_time_obj, end_time_obj):
+    def get_pricing_context(cls, turf=None, date_obj=None):
+        """
+        Pre-fetches all pricing rules, holidays, and special events in a single batch.
+        Eliminates repeated database roundtrips when calculating slot pricing matrices.
+        """
+        rules = list(PricingRule.objects.filter(is_active=True).order_by("-priority"))
+        holiday = None
+        special_event = None
+        if date_obj:
+            holiday = Holiday.objects.filter(date=date_obj).first()
+            se_qs = SpecialEvent.objects.filter(date=date_obj)
+            if turf:
+                special_event = se_qs.filter(Q(turf__isnull=True) | Q(turf=turf)).first()
+            else:
+                special_event = se_qs.first()
+
+        return {
+            "rules": rules,
+            "holiday": holiday,
+            "special_event": special_event,
+        }
+
+    @classmethod
+    def calculate_slot_price(cls, turf, date_obj, start_time_obj, end_time_obj, pricing_context=None):
         """
         Calculates the dynamic price for a single slot based on:
         - Base Price of Turf
@@ -16,6 +40,7 @@ class PricingEngine:
         - Peak hour / Off-peak rules
         - Holiday surge
         - Special event surge
+        Supports optional pre-fetched pricing_context to avoid N+1 DB queries.
         """
         base_price = Decimal(str(turf.base_price))
         current_price = base_price
@@ -23,8 +48,19 @@ class PricingEngine:
 
         day_of_week = date_obj.weekday()  # 0=Monday, 6=Sunday
 
+        if pricing_context is not None:
+            holiday = pricing_context.get("holiday")
+            event = pricing_context.get("special_event")
+            rules = pricing_context.get("rules", [])
+        else:
+            holiday = Holiday.objects.filter(date=date_obj).first()
+            special_event = SpecialEvent.objects.filter(date=date_obj).filter(
+                turf__isnull=True
+            ) | SpecialEvent.objects.filter(date=date_obj, turf=turf)
+            event = special_event.first()
+            rules = list(PricingRule.objects.filter(is_active=True).order_by("-priority"))
+
         # 1. Check for Holiday surge
-        holiday = Holiday.objects.filter(date=date_obj).first()
         if holiday:
             multiplier = Decimal(str(holiday.surge_multiplier))
             surge = round(base_price * (multiplier - Decimal("1.00")), 2)
@@ -38,10 +74,6 @@ class PricingEngine:
             )
 
         # 2. Check for Special Events
-        special_event = SpecialEvent.objects.filter(date=date_obj).filter(
-            turf__isnull=True
-        ) | SpecialEvent.objects.filter(date=date_obj, turf=turf)
-        event = special_event.first()
         if event:
             multiplier = Decimal(str(event.surge_multiplier))
             surge = round(base_price * (multiplier - Decimal("1.00")), 2)
@@ -55,10 +87,9 @@ class PricingEngine:
             )
 
         # 3. Dynamic Pricing Rules
-        rules = PricingRule.objects.filter(is_active=True).order_by("-priority")
         for rule in rules:
             # Check turf applicability
-            if rule.turf and rule.turf_id != turf.id:
+            if rule.turf_id and rule.turf_id != turf.id:
                 continue
 
             # Check date range applicability
@@ -125,6 +156,7 @@ class PricingEngine:
         total_base = Decimal("0.00")
         total_adjustments = Decimal("0.00")
         slots_breakdown = []
+        pricing_context = cls.get_pricing_context(turf, date_obj)
 
         for item in slot_items:
             start_t = item["start_time"]
@@ -142,7 +174,7 @@ class PricingEngine:
                     else datetime.strptime(end_t, "%H:%M").time()
                 )
 
-            calc = cls.calculate_slot_price(turf, date_obj, start_t, end_t)
+            calc = cls.calculate_slot_price(turf, date_obj, start_t, end_t, pricing_context=pricing_context)
             total_base += Decimal(str(calc["base_price"]))
             slot_adj = sum(Decimal(str(r["amount"])) for r in calc["applied_rules"])
             total_adjustments += slot_adj

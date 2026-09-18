@@ -39,6 +39,9 @@ from .permissions import (
 from audit.models import AuditLog
 
 
+logger = logging.getLogger(__name__)
+
+
 DEFAULT_FEATURE_FLAGS = {
     "RECURRING_BOOKINGS": True,
     "PARTIAL_PAYMENTS": True,
@@ -213,14 +216,20 @@ class GoogleAuthView(views.APIView):
             tokens = get_tokens_for_user(user)
             user_data = UserSerializer(user).data
 
-        return Response(
-            {
-                "message": "Authentication successful",
-                "user": user_data,
-                "tokens": tokens,
-            },
-            status=status.HTTP_200_OK,
-        )
+            return Response(
+                {
+                    "message": "Authentication successful",
+                    "user": user_data,
+                    "tokens": tokens,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.exception("Google authentication failed: %s", e)
+            return Response(
+                {"detail": f"Google authentication failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class CheckUserAvailabilityView(views.APIView):

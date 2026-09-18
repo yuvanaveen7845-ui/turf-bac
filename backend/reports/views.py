@@ -60,50 +60,54 @@ class AdminDashboardMetricsView(views.APIView):
             or 4.9
         )
 
-        # 5. Last 7 Days Revenue Trend
+        # 5. Last 7 Days Revenue Trend (Single-pass grouped query)
+        week_ago = today - timedelta(days=6)
+        recent_bookings = Booking.objects.filter(
+            date__gte=week_ago,
+            date__lte=today,
+        ).values("date", "status", "amount_paid")
+
+        rev_by_date = {}
+        cnt_by_date = {}
+        for b in recent_bookings:
+            d = b["date"]
+            cnt_by_date[d] = cnt_by_date.get(d, 0) + 1
+            if b["status"] in ["CONFIRMED", "CHECKED_IN", "IN_PROGRESS", "COMPLETED"]:
+                rev_by_date[d] = rev_by_date.get(d, Decimal("0.00")) + (b["amount_paid"] or Decimal("0.00"))
+
         revenue_trend = []
         for i in range(6, -1, -1):
             day = today - timedelta(days=i)
-            day_rev = Booking.objects.filter(
-                date=day,
-                status__in=["CONFIRMED", "CHECKED_IN", "IN_PROGRESS", "COMPLETED"],
-            ).aggregate(Sum("amount_paid"))["amount_paid__sum"] or Decimal("0.00")
-            day_bookings_cnt = Booking.objects.filter(date=day).count()
             revenue_trend.append(
                 {
                     "date": day.strftime("%a, %d %b"),
-                    "revenue": float(day_rev),
-                    "bookings": day_bookings_cnt,
+                    "revenue": float(rev_by_date.get(day, Decimal("0.00"))),
+                    "bookings": cnt_by_date.get(day, 0),
                 }
             )
 
-        # 6. Peak Hours Analysis
-        all_bookings = Booking.objects.all()
-        hour_counts = {}
-        for b in all_bookings:
-            hr_str = b.start_time.strftime("%I %p")
-            hour_counts[hr_str] = hour_counts.get(hr_str, 0) + 1
+        # 6. Peak Hours Analysis (Aggregated in database)
+        peak_qs = (
+            Booking.objects.values("start_time")
+            .annotate(count=Count("id"))
+            .order_by("-count")[:8]
+        )
+        peak_hours = []
+        for p in peak_qs:
+            st = p["start_time"]
+            hr_str = st.strftime("%I %p") if hasattr(st, "strftime") else str(st)
+            peak_hours.append({"hour": hr_str, "count": p["count"]})
 
-        peak_hours = [
-            {"hour": hr, "count": cnt}
-            for hr, cnt in sorted(
-                hour_counts.items(), key=lambda x: x[1], reverse=True
-            )[:8]
+        # 7. Turf Utilization (Annotated in single query)
+        turf_utilization = [
+            {
+                "turf_name": t.name,
+                "sport": t.sport_type,
+                "total_bookings": t.total_bookings,
+                "base_price": float(t.base_price),
+            }
+            for t in Turf.objects.annotate(total_bookings=Count("bookings"))
         ]
-
-        # 7. Turf Utilization
-        turfs = Turf.objects.all()
-        turf_utilization = []
-        for t in turfs:
-            t_booked = Booking.objects.filter(turf=t).count()
-            turf_utilization.append(
-                {
-                    "turf_name": t.name,
-                    "sport": t.sport_type,
-                    "total_bookings": t_booked,
-                    "base_price": float(t.base_price),
-                }
-            )
 
         return Response(
             {

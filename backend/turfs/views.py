@@ -181,9 +181,10 @@ class DailyScheduleView(views.APIView):
             turfs_qs = turfs_qs.filter(sport_type=sport.upper())
 
         turfs_data = []
+        pricing_context = PricingEngine.get_pricing_context(date_obj=date_obj)
         for turf in turfs_qs:
             avail = SchedulingEngine.get_turf_availability(
-                turf=turf, date_obj=date_obj, user=request.user
+                turf=turf, date_obj=date_obj, user=request.user, pricing_context=pricing_context
             )
             turfs_data.append(
                 {

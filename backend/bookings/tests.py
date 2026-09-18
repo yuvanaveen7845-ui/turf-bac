@@ -42,7 +42,7 @@ class BookingEngineTests(TestCase):
         self.staff = User.objects.create_user(
             email="staff@friendsturf.local", password="password123", role="STAFF"
         )
-        self.today = timezone.now().date()
+        self.today = timezone.now().date() + timedelta(days=1)
         self.slots = SchedulingEngine.generate_daily_slots(self.turf, self.today)
 
     def test_slot_lock_prevents_double_booking(self):

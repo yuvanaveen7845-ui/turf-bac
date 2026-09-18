@@ -48,7 +48,7 @@ def stream_events(request):
 
     def event_generator():
         last_check = time.time()
-        start_time = time.time()
+        heartbeat_counter = 0
         # Initial greeting event
         yield format_sse({
             "type": "CONNECTION_ESTABLISHED",
@@ -57,23 +57,20 @@ def stream_events(request):
             "server_time": last_check,
         }, event_name="open")
 
-        # In WSGI environments (like Django runserver), infinite blocking loops lock the entire worker thread.
-        # We run up to 10 cycles of 1-second chunks, then conclude the stream gracefully.
-        # Modern SSE clients (EventSource) automatically reconnect smoothly without thread exhaustion.
-        for _ in range(10):
-            time.sleep(1.0)
+        # Yield events quickly to prevent locking WSGI worker threads.
+        # Short burst cycles allow EventSource to reconnect cleanly without thread starvation.
+        for _ in range(6):
+            time.sleep(0.5)
             now = time.time()
+            heartbeat_counter += 1
             new_events = get_events_since(last_check, channels)
             if new_events:
                 last_check = now
                 for ev in new_events:
                     yield format_sse(ev, event_name=ev["type"])
-            
-            # Send keep-alive comment ping every 5 seconds (10 cycles of 0.5s)
-            if heartbeat_counter >= 10:
+            elif heartbeat_counter >= 4:
                 heartbeat_counter = 0
                 yield f": heartbeat {now}\n\n"
-            yield f": heartbeat {now}\n\n"
 
     response = StreamingHttpResponse(event_generator(), content_type="text/event-stream")
     response["Cache-Control"] = "no-cache, no-transform"

@@ -95,6 +95,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     def full_name(self):
         return f"{self.first_name} {self.last_name}".strip() or self.email
 
+    def get_full_name(self):
+        return self.full_name
+
+    def get_short_name(self):
+        return self.first_name or self.email
+
     @staticmethod
     def canonicalize_email(email: str) -> str:
         """Standardize email address to lowercase and trimmed string."""

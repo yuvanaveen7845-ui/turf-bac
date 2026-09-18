@@ -287,89 +287,101 @@ class RequestPasswordResetOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        serializer = RequestPasswordResetOTPSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            serializer = RequestPasswordResetOTPSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        email = serializer.validated_data["email"]
-        exists, user = user_lookup_engine.check_email_exists(email)
+            email = serializer.validated_data["email"]
+            exists, user = user_lookup_engine.check_email_exists(email)
 
-        if not exists or not user:
-            return Response(
-                {
-                    "error": "No player account found with this email address. Please check your spelling or register a new account.",
-                    "status": "NOT_FOUND",
-                },
-                status=status.HTTP_404_NOT_FOUND,
+            if not exists or not user:
+                return Response(
+                    {
+                        "error": "No player account found with this email address. Please check your spelling or register a new account.",
+                        "status": "NOT_FOUND",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            if not user.is_active or user.status in ("SUSPENDED", "DISABLED"):
+                return Response(
+                    {
+                        "error": "This account has been suspended or disabled. Please contact the arena help desk.",
+                        "status": "INACTIVE",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Rate-limiting / Cooldown check: 60 seconds between OTP requests
+            recent_otp = (
+                PasswordResetOTP.objects.filter(user=user, is_used=False)
+                .order_by("-created_at")
+                .first()
+            )
+            now = timezone.now()
+            if recent_otp and (now - recent_otp.created_at).total_seconds() < 60:
+                remaining = 60 - int((now - recent_otp.created_at).total_seconds())
+                return Response(
+                    {
+                        "error": f"Please wait {remaining} seconds before requesting a new OTP.",
+                        "cooldown_seconds": remaining,
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+
+            # Extract client IP cleanly
+            x_forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+            ip_addr = x_forwarded.split(",")[0].strip() if x_forwarded else (request.META.get("REMOTE_ADDR") or "")
+            user_agent = str(request.META.get("HTTP_USER_AGENT", ""))[:500]
+
+            # Generate Cryptographic OTP
+            otp_instance, raw_otp = PasswordResetOTP.generate_otp_for_user(
+                user=user,
+                validity_minutes=10,
+                ip_address=ip_addr,
+                user_agent=user_agent,
             )
 
-        if not user.is_active or user.status in ("SUSPENDED", "DISABLED"):
-            return Response(
-                {
-                    "error": "This account has been suspended or disabled. Please contact the arena help desk.",
-                    "status": "INACTIVE",
-                },
-                status=status.HTTP_403_FORBIDDEN,
+            # Dispatch branded HTML email via Django SMTP
+            email_sent = EmailNotificationService.send_otp_email(
+                user=user,
+                otp_code=raw_otp,
+                valid_minutes=10,
+                ip_address=ip_addr,
             )
 
-        # Rate-limiting / Cooldown check: 60 seconds between OTP requests
-        recent_otp = (
-            PasswordResetOTP.objects.filter(user=user, is_used=False)
-            .order_by("-created_at")
-            .first()
-        )
-        now = timezone.now()
-        if recent_otp and (now - recent_otp.created_at).total_seconds() < 60:
-            remaining = 60 - int((now - recent_otp.created_at).total_seconds())
-            return Response(
-                {
-                    "error": f"Please wait {remaining} seconds before requesting a new OTP.",
-                    "cooldown_seconds": remaining,
-                },
-                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            AuditLog.log(
+                user=user,
+                action="PASSWORD_RESET_OTP_REQUESTED",
+                resource_type="AUTH",
+                resource_id=user.email,
+                ip_address=ip_addr,
+                details={"email_delivered": email_sent},
+                request=request,
             )
 
-        # Generate Cryptographic OTP
-        ip_addr = request.META.get("HTTP_X_FORWARDED_FOR") or request.META.get("REMOTE_ADDR")
-        user_agent = request.META.get("HTTP_USER_AGENT", "")
-        otp_instance, raw_otp = PasswordResetOTP.generate_otp_for_user(
-            user=user,
-            validity_minutes=10,
-            ip_address=ip_addr,
-            user_agent=user_agent,
-        )
+            response_payload = {
+                "status": "OTP_SENT",
+                "message": f"A 6-digit verification code has been sent to {user_lookup_engine.mask_email(user.email)}.",
+                "email": user.email,
+                "masked_email": user_lookup_engine.mask_email(user.email),
+                "expires_in_seconds": 600,
+                "cooldown_seconds": 60,
+            }
 
-        # Dispatch branded HTML email via Django SMTP
-        email_sent = EmailNotificationService.send_otp_email(
-            user=user,
-            otp_code=raw_otp,
-            valid_minutes=10,
-            ip_address=ip_addr,
-        )
+            # In development or if email delivery could not connect, provide the OTP for convenience
+            if getattr(settings, "DEBUG", False) or not email_sent:
+                response_payload["dev_otp"] = raw_otp
+                response_payload["dev_otp_code"] = raw_otp
 
-        AuditLog.objects.create(
-            user=user,
-            action="PASSWORD_RESET_OTP_REQUESTED",
-            resource_type="AUTH",
-            resource_id=user.email,
-            details={"ip": ip_addr, "email_delivered": email_sent},
-        )
-
-        response_payload = {
-            "status": "OTP_SENT",
-            "message": f"A 6-digit verification code has been sent to {user_lookup_engine.mask_email(user.email)}.",
-            "email": user.email,
-            "masked_email": user_lookup_engine.mask_email(user.email),
-            "expires_in_seconds": 600,
-            "cooldown_seconds": 60,
-        }
-
-        # Include raw code in debug/local dev mode for seamless testing
-        if getattr(settings, "DEBUG", False):
-            response_payload["dev_otp"] = raw_otp
-            response_payload["dev_otp_code"] = raw_otp
-
-        return Response(response_payload, status=status.HTTP_200_OK)
+            return Response(response_payload, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Error requesting password reset OTP: %s", e)
+            return Response(
+                {"error": "Failed to process password reset request. Please try again.", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class VerifyPasswordResetOTPView(views.APIView):
@@ -380,81 +392,88 @@ class VerifyPasswordResetOTPView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        serializer = VerifyPasswordResetOTPSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            serializer = VerifyPasswordResetOTPSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        email = serializer.validated_data["email"]
-        candidate_otp = serializer.validated_data["otp"]
+            email = serializer.validated_data["email"]
+            candidate_otp = serializer.validated_data["otp"]
 
-        user = User.objects.filter(email__iexact=email).first()
-        if not user:
-            return Response(
-                {"error": "No account found for this email address."},
-                status=status.HTTP_404_NOT_FOUND,
+            user = User.objects.filter(email__iexact=email).first()
+            if not user:
+                return Response(
+                    {"error": "No account found for this email address."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            active_otp = (
+                PasswordResetOTP.objects.filter(
+                    user=user, is_verified=False, is_used=False
+                )
+                .order_by("-created_at")
+                .first()
             )
 
-        active_otp = (
-            PasswordResetOTP.objects.filter(
-                user=user, is_verified=False, is_used=False
-            )
-            .order_by("-created_at")
-            .first()
-        )
+            if not active_otp:
+                return Response(
+                    {"error": "No active verification code found. Please request a new one."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
-        if not active_otp:
-            return Response(
-                {"error": "No active verification code found. Please request a new one."},
-                status=status.HTTP_400_BAD_REQUEST,
+            if active_otp.is_expired():
+                return Response(
+                    {"error": "Verification code has expired. Please request a new OTP."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if active_otp.is_locked():
+                return Response(
+                    {
+                        "error": "Maximum verification attempts exceeded. Please request a new OTP code.",
+                        "status": "LOCKED",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            is_valid = active_otp.verify_code(candidate_otp)
+            if not is_valid:
+                remaining_attempts = max(0, active_otp.max_attempts - active_otp.attempts)
+                return Response(
+                    {
+                        "error": f"Invalid verification code. {remaining_attempts} attempts remaining.",
+                        "remaining_attempts": remaining_attempts,
+                        "attempts_left": remaining_attempts,
+                        "decision": "OUT",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # OTP Verified Successfully
+            AuditLog.log(
+                user=user,
+                action="PASSWORD_RESET_OTP_VERIFIED",
+                resource_type="AUTH",
+                resource_id=user.email,
+                request=request,
             )
 
-        if active_otp.is_expired():
-            return Response(
-                {"error": "Verification code has expired. Please request a new OTP."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if active_otp.is_locked():
             return Response(
                 {
-                    "error": "Maximum verification attempts exceeded. Please request a new OTP code.",
-                    "status": "LOCKED",
+                    "status": "VERIFIED",
+                    "decision": "SAFE",
+                    "message": "OTP verified successfully. You may now set your new password.",
+                    "reset_token": active_otp.reset_token,
+                    "email": user.email,
                 },
-                status=status.HTTP_403_FORBIDDEN,
+                status=status.HTTP_200_OK,
             )
-
-        is_valid = active_otp.verify_code(candidate_otp)
-        if not is_valid:
-            remaining_attempts = max(0, active_otp.max_attempts - active_otp.attempts)
+        except Exception as e:
+            logger.exception("Error verifying password reset OTP: %s", e)
             return Response(
-                {
-                    "error": f"Invalid verification code. {remaining_attempts} attempts remaining.",
-                    "remaining_attempts": remaining_attempts,
-                    "attempts_left": remaining_attempts,
-                    "decision": "OUT",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+                {"error": "Failed to verify OTP code. Please try again.", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-        # OTP Verified Successfully
-        AuditLog.objects.create(
-            user=user,
-            action="PASSWORD_RESET_OTP_VERIFIED",
-            resource_type="AUTH",
-            resource_id=user.email,
-            details={"ip": request.META.get("REMOTE_ADDR")},
-        )
-
-        return Response(
-            {
-                "status": "VERIFIED",
-                "decision": "SAFE",
-                "message": "OTP verified successfully. You may now set your new password.",
-                "reset_token": active_otp.reset_token,
-                "email": user.email,
-            },
-            status=status.HTTP_200_OK,
-        )
 
 
 class ConfirmPasswordResetView(views.APIView):
@@ -464,46 +483,53 @@ class ConfirmPasswordResetView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        serializer = SetNewPasswordSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            serializer = SetNewPasswordSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        reset_token = serializer.validated_data["reset_token"].strip()
-        new_password = serializer.validated_data["password"]
+            reset_token = serializer.validated_data["reset_token"].strip()
+            new_password = serializer.validated_data["password"]
 
-        otp_record = PasswordResetOTP.objects.filter(
-            reset_token=reset_token, is_verified=True, is_used=False
-        ).first()
+            otp_record = PasswordResetOTP.objects.filter(
+                reset_token=reset_token, is_verified=True, is_used=False
+            ).first()
 
-        if not otp_record or otp_record.is_expired():
-            return Response(
-                {"error": "Reset session is invalid or has expired. Please request a new OTP."},
-                status=status.HTTP_400_BAD_REQUEST,
+            if not otp_record or otp_record.is_expired():
+                return Response(
+                    {"error": "Reset session is invalid or has expired. Please request a new OTP."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user = otp_record.user
+            user.set_password(new_password)
+            user.save()
+
+            # Invalidate OTP session token
+            otp_record.is_used = True
+            otp_record.save(update_fields=["is_used"])
+
+            AuditLog.log(
+                user=user,
+                action="PASSWORD_RESET_COMPLETED",
+                resource_type="AUTH",
+                resource_id=user.email,
+                request=request,
             )
 
-        user = otp_record.user
-        user.set_password(new_password)
-        user.save()
-
-        # Invalidate OTP session token
-        otp_record.is_used = True
-        otp_record.save(update_fields=["is_used"])
-
-        AuditLog.objects.create(
-            user=user,
-            action="PASSWORD_RESET_COMPLETED",
-            resource_type="AUTH",
-            resource_id=user.email,
-            details={"ip": request.META.get("REMOTE_ADDR")},
-        )
-
-        return Response(
-            {
-                "status": "SUCCESS",
-                "message": "Your password has been successfully updated! You can now log in with your new credentials.",
-            },
-            status=status.HTTP_200_OK,
-        )
+            return Response(
+                {
+                    "status": "SUCCESS",
+                    "message": "Your password has been successfully updated! You can now log in with your new credentials.",
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.exception("Error confirming password reset: %s", e)
+            return Response(
+                {"error": "Failed to reset password. Please try again.", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class ForgotPasswordView(views.APIView):

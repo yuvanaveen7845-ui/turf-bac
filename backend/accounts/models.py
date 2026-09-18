@@ -249,12 +249,18 @@ class PasswordResetOTP(models.Model):
         otp_hash = cls.hash_otp(raw_code)
         expires_at = timezone.now() + timezone.timedelta(minutes=validity_minutes)
 
+        clean_ip = None
+        if ip_address:
+            first_ip = str(ip_address).split(",")[0].strip()
+            if first_ip and len(first_ip) <= 45:
+                clean_ip = first_ip
+
         instance = cls.objects.create(
             user=user,
             otp_hash=otp_hash,
             expires_at=expires_at,
-            ip_address=ip_address,
-            user_agent=user_agent or "",
+            ip_address=clean_ip,
+            user_agent=str(user_agent or "")[:500],
         )
         return instance, raw_code
 

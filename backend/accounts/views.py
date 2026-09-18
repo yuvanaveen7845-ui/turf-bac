@@ -215,7 +215,6 @@ class GoogleAuthView(views.APIView):
 
             tokens = get_tokens_for_user(user)
             user_data = UserSerializer(user).data
-
             return Response(
                 {
                     "message": "Authentication successful",
@@ -225,9 +224,9 @@ class GoogleAuthView(views.APIView):
                 status=status.HTTP_200_OK,
             )
         except Exception as e:
-            logger.exception("Google authentication failed: %s", e)
+            logger.exception("Google authentication error: %s", e)
             return Response(
-                {"detail": f"Google authentication failed: {str(e)}"},
+                {"detail": "Failed to complete Google authentication. Please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
@@ -370,18 +369,7 @@ class RequestPasswordResetOTPView(views.APIView):
                 "cooldown_seconds": 60,
             }
 
-            # In development or if email delivery could not connect, provide the OTP for convenience
-            if getattr(settings, "DEBUG", False) or not email_sent:
-                response_payload["dev_otp"] = raw_otp
-                response_payload["dev_otp_code"] = raw_otp
-
-            return Response(response_payload, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.exception("Error requesting password reset OTP: %s", e)
-            return Response(
-                {"error": "Failed to process password reset request. Please try again.", "detail": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        return Response(response_payload, status=status.HTTP_200_OK)
 
 
 class VerifyPasswordResetOTPView(views.APIView):
@@ -973,7 +961,6 @@ class AdminCustomerDetailView(views.APIView):
         from payments.serializers import PaymentSerializer
         from reviews.models import Review
         from reviews.serializers import ReviewSerializer
-        from wallet.models import LoyaltyTransaction
 
         customer = generics.get_object_or_404(User, pk=pk, role="CUSTOMER")
         user_data = UserSerializer(customer).data
@@ -982,7 +969,6 @@ class AdminCustomerDetailView(views.APIView):
         payments = Payment.objects.filter(customer=customer).select_related("booking").order_by("-created_at")
         reviews = Review.objects.filter(customer=customer).select_related("turf").order_by("-created_at")
         notes = CustomerNote.objects.filter(customer=customer).select_related("author").order_by("-is_pinned", "-created_at")
-        loyalty_txns = LoyaltyTransaction.objects.filter(customer=customer).order_by("-created_at")[:20]
 
         total_bookings_count = bookings.count()
         completed_bookings_count = bookings.filter(status="COMPLETED").count()
@@ -1002,16 +988,6 @@ class AdminCustomerDetailView(views.APIView):
             "payments": PaymentSerializer(payments[:30], many=True).data,
             "reviews": ReviewSerializer(reviews, many=True).data,
             "notes": CustomerNoteSerializer(notes, many=True).data,
-            "loyalty_transactions": [
-                {
-                    "id": tx.id,
-                    "points": tx.points,
-                    "type": tx.transaction_type,
-                    "description": tx.description,
-                    "created_at": tx.created_at.strftime("%Y-%m-%d %H:%M"),
-                }
-                for tx in loyalty_txns
-            ],
         })
 
 

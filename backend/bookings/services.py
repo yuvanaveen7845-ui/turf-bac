@@ -6,12 +6,12 @@ from django.utils import timezone
 from .models import Booking
 from turfs.models import Turf, TimeSlot
 from payments.models import Payment
-from promotions.models import Coupon, CouponUsage, ReferralReward
+from promotions.models import Coupon, CouponUsage
 from pricing.engine import PricingEngine
 from qr_system.services import QRService
 from notifications.models import Notification
 from notifications.services import EmailNotificationService
-from wallet.models import WalletTransaction, LoyaltyTransaction
+from wallet.models import WalletTransaction
 from audit.models import AuditLog
 
 
@@ -268,23 +268,11 @@ class BookingEngine:
             # Generate QR Ticket
             QRService.generate_qr_for_booking(booking)
 
-            # Update customer profile stats and loyalty
+            # Update customer profile stats
             if hasattr(user, "customer_profile") and amt_paid > 0:
                 prof = user.customer_profile
                 prof.total_bookings += 1
                 prof.total_spending = Decimal(str(prof.total_spending)) + amt_paid
-                points_earned = int(amt_paid * Decimal("0.05"))
-                if points_earned > 0:
-                    prof.loyalty_points += points_earned
-                    LoyaltyTransaction.objects.create(
-                        customer=user,
-                        points=points_earned,
-                        transaction_type="EARN",
-                        source="BOOKING",
-                        reference_id=booking.booking_id,
-                        description=f"Earned from booking {booking.booking_id}",
-                        balance_after=prof.loyalty_points,
-                    )
                 prof.save()
 
             # Notification & Audit

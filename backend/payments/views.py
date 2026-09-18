@@ -25,7 +25,7 @@ from promotions.models import Coupon, CouponUsage
 from qr_system.services import QRService
 from notifications.models import Notification
 from notifications.services import EmailNotificationService
-from wallet.models import WalletTransaction, LoyaltyTransaction
+from wallet.models import WalletTransaction
 from audit.models import AuditLog
 from accounts.permissions import (
     IsAdmin,
@@ -354,23 +354,11 @@ class VerifyRazorpayPaymentView(views.APIView):
         # Generate Cryptographic QR Ticket
         QRService.generate_qr_for_booking(booking)
 
-        # Update Customer profile spending & loyalty
+        # Update Customer profile spending
         if hasattr(booking.customer, "customer_profile"):
             prof = booking.customer.customer_profile
             prof.total_bookings += 1
             prof.total_spending = Decimal(str(prof.total_spending)) + Decimal(str(payment.amount))
-            points_earned = int(Decimal(str(payment.amount)) * Decimal("0.05"))
-            if points_earned > 0:
-                prof.loyalty_points += points_earned
-                LoyaltyTransaction.objects.create(
-                    customer=booking.customer,
-                    points=points_earned,
-                    transaction_type="EARN",
-                    source="BOOKING",
-                    reference_id=booking.booking_id,
-                    description=f"Earned from verified payment on booking {booking.booking_id}",
-                    balance_after=prof.loyalty_points,
-                )
             prof.save()
 
         # Send in-app notification

@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDir: backend
     buildCommand: "pip install -r requirements.txt && python manage.py migrate && python manage.py seed_data"
-    startCommand: "gunicorn friends_turf.wsgi:application --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 60"
+    startCommand: "gunicorn friends_turf.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --worker-class gthread --worker-tmp-dir /dev/shm --timeout 90"
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.2

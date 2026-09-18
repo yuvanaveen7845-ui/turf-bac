@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Coupon, CouponUsage, ReferralReward
+from .models import Coupon, CouponUsage
 
 
 class CouponSerializer(serializers.ModelSerializer):
@@ -24,20 +24,3 @@ class CouponSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "usage_count", "created_at"]
-
-
-class ReferralRewardSerializer(serializers.ModelSerializer):
-    referred_email = serializers.ReadOnlyField(source="referred_user.email")
-    referred_name = serializers.ReadOnlyField(source="referred_user.full_name")
-
-    class Meta:
-        model = ReferralReward
-        fields = [
-            "id",
-            "referred_email",
-            "referred_name",
-            "reward_amount",
-            "status",
-            "created_at",
-            "credited_at",
-        ]

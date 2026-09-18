@@ -369,7 +369,13 @@ class RequestPasswordResetOTPView(views.APIView):
                 "cooldown_seconds": 60,
             }
 
-        return Response(response_payload, status=status.HTTP_200_OK)
+            return Response(response_payload, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Error requesting password reset OTP: %s", e)
+            return Response(
+                {"error": "Failed to request password reset OTP. Please try again.", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class VerifyPasswordResetOTPView(views.APIView):

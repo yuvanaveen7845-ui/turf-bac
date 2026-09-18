@@ -6,8 +6,7 @@ from decimal import Decimal
 from accounts.models import User, CustomerProfile, StaffProfile
 from turfs.models import Facility, Turf, TimeSlot
 from turfs.services import SchedulingEngine
-from pricing.models import PricingRule, Holiday
-from promotions.models import Coupon, ReferralReward
+from promotions.models import Coupon
 from memberships.models import MembershipPlan, CustomerMembership
 from bookings.models import Booking
 from bookings.services import BookingEngine

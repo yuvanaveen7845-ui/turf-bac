@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from accounts.models import User, CustomerProfile, StaffProfile
 from turfs.models import Facility, Turf, TimeSlot
+from turfs.services import SchedulingEngine
 from pricing.models import PricingRule, Holiday
 from promotions.models import Coupon, ReferralReward
 from memberships.models import MembershipPlan, CustomerMembership
@@ -420,30 +421,10 @@ class Command(BaseCommand):
 
         # 7. Generate Slots for Today and Next 7 Days
         today = timezone.now().date()
-        new_slots = []
         for offset in range(8):
             day = today + timedelta(days=offset)
             for turf in turf_objs:
-                cur_t = turf.operating_hours_start
-                while cur_t < turf.operating_hours_end:
-                    start_dt = datetime.combine(day, cur_t)
-                    end_dt = start_dt + timedelta(minutes=turf.slot_duration_minutes)
-                    end_t = end_dt.time()
-                    if end_t > turf.operating_hours_end:
-                        break
-                    new_slots.append(
-                        TimeSlot(
-                            turf=turf,
-                            date=day,
-                            start_time=cur_t,
-                            end_time=end_t,
-                            status="AVAILABLE",
-                            price=turf.base_price,
-                        )
-                    )
-                    cur_t = end_t
-
-        TimeSlot.objects.bulk_create(new_slots, ignore_conflicts=True)
+                SchedulingEngine.generate_daily_slots(turf, day)
         self.stdout.write(self.style.SUCCESS("Generated slots for next 8 days"))
 
         # 8. Create Realistic Demo Bookings

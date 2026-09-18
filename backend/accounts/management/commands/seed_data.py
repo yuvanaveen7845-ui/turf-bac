@@ -5,16 +5,14 @@ from decimal import Decimal
 
 from accounts.models import User, CustomerProfile, StaffProfile
 from turfs.models import Facility, Turf, TimeSlot
-from pricing.models import PricingRule, Holiday
-from promotions.models import Coupon, ReferralReward
+from promotions.models import Coupon
 from memberships.models import MembershipPlan, CustomerMembership
 from bookings.models import Booking
 from bookings.services import BookingEngine
 from payments.models import Payment
 from qr_system.services import QRService
-from reviews.models import Review
 from notifications.models import Notification
-from wallet.models import WalletTransaction, LoyaltyTransaction
+from wallet.models import WalletTransaction
 
 
 class Command(BaseCommand):
@@ -127,7 +125,6 @@ class Command(BaseCommand):
             )
             cust_prof = customer_user.customer_profile
             cust_prof.wallet_balance = Decimal("1500.00")
-            cust_prof.loyalty_points = 350
             cust_prof.membership_tier = "GOLD"
             cust_prof.save()
         self.stdout.write(
@@ -145,11 +142,9 @@ class Command(BaseCommand):
                 last_name="Dravid",
                 phone="+91 98765 44556",
                 role="CUSTOMER",
-                referred_by=customer_user,
             )
             r_prof = rahul_user.customer_profile
             r_prof.wallet_balance = Decimal("500.00")
-            r_prof.loyalty_points = 120
             r_prof.membership_tier = "REGULAR"
             r_prof.save()
 
@@ -283,13 +278,12 @@ class Command(BaseCommand):
                 "description": "Ideal for casual weekend warriors looking for steady savings.",
                 "discount_percentage": Decimal("5.00"),
                 "priority_booking_days": 7,
-                "loyalty_point_multiplier": Decimal("1.00"),
                 "monthly_price": Decimal("499.00"),
                 "annual_price": Decimal("4999.00"),
                 "features": [
                     "5% discount on all bookings",
                     "7 days advance slot booking",
-                    "Standard loyalty points",
+                    "Complimentary warm-up gear",
                     "Free locker access",
                 ],
                 "badge_color": "#94A3B8",
@@ -301,14 +295,12 @@ class Command(BaseCommand):
                 "description": "Our most popular tier for active team organizers and weekly regulars.",
                 "discount_percentage": Decimal("10.00"),
                 "priority_booking_days": 14,
-                "loyalty_point_multiplier": Decimal("1.50"),
                 "monthly_price": Decimal("899.00"),
                 "annual_price": Decimal("8999.00"),
                 "features": [
                     "10% discount on all bookings",
                     "14 days priority slot booking",
-                    "1.5x loyalty points earning",
-                    "Free ball and bib rental",
+                    "Free match balls and bib rental",
                     "Zero cancellation charges up to 12h",
                 ],
                 "badge_color": "#F59E0B",
@@ -320,13 +312,12 @@ class Command(BaseCommand):
                 "description": "Elite club access with maximum savings, prime hour priority, and VIP concierge.",
                 "discount_percentage": Decimal("15.00"),
                 "priority_booking_days": 30,
-                "loyalty_point_multiplier": Decimal("2.00"),
                 "monthly_price": Decimal("1499.00"),
                 "annual_price": Decimal("14999.00"),
                 "features": [
                     "15% discount on all bookings",
                     "30 days VIP advance booking",
-                    "2x loyalty points on every game",
+                    "Dedicated match concierge support",
                     "Priority tournament invitations",
                     "Complimentary energy drinks each visit",
                 ],

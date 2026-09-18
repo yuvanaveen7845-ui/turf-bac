@@ -4,8 +4,8 @@ from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
-from .models import Coupon, CouponUsage, ReferralReward
-from .serializers import CouponSerializer, ReferralRewardSerializer
+from .models import Coupon, CouponUsage
+from .serializers import CouponSerializer
 from accounts.permissions import IsAdmin
 
 
@@ -71,28 +71,5 @@ class ValidateCouponView(views.APIView):
                 "discount_amount": float(discount),
                 "final_amount": float(max(Decimal("0.00"), amount - discount)),
                 "message": f"Coupon applied! You save ₹{discount}.",
-            }
-        )
-
-
-class ReferralInfoView(views.APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get(self, request):
-        user = request.user
-        rewards = (
-            ReferralReward.objects.filter(referrer=user)
-            .select_related("referred_user")
-            .order_by("-created_at")
-        )
-        total_earned = sum(r.reward_amount for r in rewards.filter(status="CREDITED"))
-
-        return Response(
-            {
-                "referral_code": user.referral_code,
-                "invite_message": f"Join Friends Turf with my code {user.referral_code} and get instant discounts on your first game!",
-                "total_referrals": rewards.count(),
-                "total_reward_earned": float(total_earned),
-                "rewards": ReferralRewardSerializer(rewards, many=True).data,
             }
         )

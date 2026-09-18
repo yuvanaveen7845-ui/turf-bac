@@ -212,15 +212,20 @@ class GoogleAuthView(views.APIView):
 
             tokens = get_tokens_for_user(user)
             user_data = UserSerializer(user).data
-
-        return Response(
-            {
-                "message": "Authentication successful",
-                "user": user_data,
-                "tokens": tokens,
-            },
-            status=status.HTTP_200_OK,
-        )
+            return Response(
+                {
+                    "message": "Authentication successful",
+                    "user": user_data,
+                    "tokens": tokens,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.exception("Google authentication error: %s", e)
+            return Response(
+                {"detail": "Failed to complete Google authentication. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class CheckUserAvailabilityView(views.APIView):
@@ -354,11 +359,6 @@ class RequestPasswordResetOTPView(views.APIView):
             "expires_in_seconds": 600,
             "cooldown_seconds": 60,
         }
-
-        # Include raw code in debug/local dev mode for seamless testing
-        if getattr(settings, "DEBUG", False):
-            response_payload["dev_otp"] = raw_otp
-            response_payload["dev_otp_code"] = raw_otp
 
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -938,7 +938,6 @@ class AdminCustomerDetailView(views.APIView):
         from payments.serializers import PaymentSerializer
         from reviews.models import Review
         from reviews.serializers import ReviewSerializer
-        from wallet.models import LoyaltyTransaction
 
         customer = generics.get_object_or_404(User, pk=pk, role="CUSTOMER")
         user_data = UserSerializer(customer).data
@@ -947,7 +946,6 @@ class AdminCustomerDetailView(views.APIView):
         payments = Payment.objects.filter(customer=customer).select_related("booking").order_by("-created_at")
         reviews = Review.objects.filter(customer=customer).select_related("turf").order_by("-created_at")
         notes = CustomerNote.objects.filter(customer=customer).select_related("author").order_by("-is_pinned", "-created_at")
-        loyalty_txns = LoyaltyTransaction.objects.filter(customer=customer).order_by("-created_at")[:20]
 
         total_bookings_count = bookings.count()
         completed_bookings_count = bookings.filter(status="COMPLETED").count()
@@ -967,16 +965,6 @@ class AdminCustomerDetailView(views.APIView):
             "payments": PaymentSerializer(payments[:30], many=True).data,
             "reviews": ReviewSerializer(reviews, many=True).data,
             "notes": CustomerNoteSerializer(notes, many=True).data,
-            "loyalty_transactions": [
-                {
-                    "id": tx.id,
-                    "points": tx.points,
-                    "type": tx.transaction_type,
-                    "description": tx.description,
-                    "created_at": tx.created_at.strftime("%Y-%m-%d %H:%M"),
-                }
-                for tx in loyalty_txns
-            ],
         })
 
 

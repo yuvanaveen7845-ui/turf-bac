@@ -53,9 +53,6 @@ class RegisterSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
-    referral_code = serializers.CharField(
-        max_length=20, required=False, allow_blank=True
-    )
 
     def validate_email(self, value):
         canonical = User.canonicalize_email(value)
@@ -80,13 +77,6 @@ class RegisterSerializer(serializers.Serializer):
         return validate_password_complexity(value)
 
     def create(self, validated_data):
-        ref_code = validated_data.pop("referral_code", None)
-        referred_by = None
-        if ref_code:
-            referred_by = User.objects.filter(
-                referral_code=ref_code.strip().upper()
-            ).first()
-
         user = User.objects.create_user(
             email=validated_data["email"],
             password=validated_data["password"],
@@ -95,7 +85,6 @@ class RegisterSerializer(serializers.Serializer):
             phone=validated_data.get("phone", ""),
             role="CUSTOMER",
             status="ACTIVE",
-            referred_by=referred_by,
         )
 
         # Synchronize new user into in-memory Bloom filter bitset
@@ -169,7 +158,6 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
         model = CustomerProfile
         fields = [
             "wallet_balance",
-            "loyalty_points",
             "membership_tier",
             "total_bookings",
             "total_spending",
@@ -212,27 +200,23 @@ class UserSerializer(serializers.ModelSerializer):
             "role",
             "status",
             "permissions",
-            "referral_code",
             "date_joined",
             "last_login_at",
             "customer_profile",
             "staff_profile",
         ]
-        read_only_fields = ["id", "google_id", "referral_code", "date_joined", "last_login_at", "role", "status", "permissions"]
+        read_only_fields = ["id", "google_id", "date_joined", "last_login_at", "role", "status", "permissions"]
 
     def get_permissions(self, obj):
         return sorted(list(get_user_permissions(obj)))
 
 
-class RegisterSerializer(serializers.Serializer):
+class AdminCustomerCreateSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, min_length=6)
     first_name = serializers.CharField(max_length=100)
     last_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
-    referral_code = serializers.CharField(
-        max_length=20, required=False, allow_blank=True
-    )
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
@@ -242,14 +226,6 @@ class RegisterSerializer(serializers.Serializer):
         return value.lower()
 
     def create(self, validated_data):
-        ref_code = validated_data.pop("referral_code", None)
-        referred_by = None
-        if ref_code:
-            referred_by = User.objects.filter(
-                referral_code=ref_code.strip().upper()
-            ).first()
-
-        # Role self-selection is strictly prevented: all registrations are CUSTOMER
         user = User.objects.create_user(
             email=validated_data["email"],
             password=validated_data["password"],
@@ -258,7 +234,6 @@ class RegisterSerializer(serializers.Serializer):
             phone=validated_data.get("phone", ""),
             role="CUSTOMER",
             status="ACTIVE",
-            referred_by=referred_by,
         )
         return user
 

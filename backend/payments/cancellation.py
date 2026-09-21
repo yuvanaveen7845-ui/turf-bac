@@ -1,22 +1,20 @@
 from datetime import datetime, time
 from decimal import Decimal
 from django.utils import timezone
+from accounts.settings_helper import BusinessSettingsHelper
 
 
 class CancellationPolicyEngine:
     """
     Automated Cancellation Policy Engine for Friends Turf.
-    Calculates cancellation fees and refundable amounts based on match lead time:
-    - > 24 Hours: 100% Refundable (₹0 cancellation fee)
-    - 6 to 24 Hours: 80% Refundable (20% cancellation fee)
-    - 2 to 6 Hours: 50% Refundable (50% cancellation fee)
-    - < 2 Hours or After Kickoff: 0% Refundable (100% cancellation fee)
+    Calculates dynamic cancellation fees and refundable amounts based on match lead time
+    and database-configured business rules.
     """
 
     @classmethod
     def calculate_refund(cls, booking, as_of_time=None):
         """
-        Calculates refund eligibility and fee for a booking.
+        Calculates refund eligibility and fee for a booking dynamically.
         """
         if as_of_time is None:
             as_of_time = timezone.now()
@@ -30,17 +28,27 @@ class CancellationPolicyEngine:
 
         hours_until_kickoff = (kickoff_datetime - as_of_time).total_seconds() / 3600.0
 
-        if hours_until_kickoff >= 24.0:
+        # Load dynamic rules
+        rules = BusinessSettingsHelper.get_booking_rules()
+        full_refund_hours = float(rules.get("cancellationFullRefundHours", 24))
+        mid_tier_hours = float(rules.get("cancellationPartialRefundHours", 6))
+        mid_tier_fee = Decimal(str(rules.get("cancellationFeeMidTierPercent", 20)))
+        partial_refund_pct = Decimal(str(rules.get("partialRefundPercent", 50)))
+        late_fee = Decimal("100.00") - partial_refund_pct  # e.g. 50%
+
+        if hours_until_kickoff >= full_refund_hours:
             fee_percent = Decimal("0.00")
-            policy_desc = "Full Refund (> 24h before kickoff)"
+            policy_desc = f"Full Refund (> {int(full_refund_hours)}h before kickoff)"
             eligibility = "FULL"
-        elif hours_until_kickoff >= 6.0:
-            fee_percent = Decimal("20.00")
-            policy_desc = "80% Refund (6h–24h before kickoff; 20% cancellation fee)"
+        elif hours_until_kickoff >= mid_tier_hours:
+            fee_percent = mid_tier_fee
+            refund_pct = 100 - float(mid_tier_fee)
+            policy_desc = f"{int(refund_pct)}% Refund ({int(mid_tier_hours)}h–{int(full_refund_hours)}h before kickoff; {int(mid_tier_fee)}% fee)"
             eligibility = "PARTIAL"
         elif hours_until_kickoff >= 2.0:
-            fee_percent = Decimal("50.00")
-            policy_desc = "50% Refund (2h–6h before kickoff; 50% cancellation fee)"
+            fee_percent = late_fee
+            refund_pct = 100 - float(late_fee)
+            policy_desc = f"{int(refund_pct)}% Refund (2h–{int(mid_tier_hours)}h before kickoff; {int(late_fee)}% fee)"
             eligibility = "PARTIAL"
         else:
             fee_percent = Decimal("100.00")

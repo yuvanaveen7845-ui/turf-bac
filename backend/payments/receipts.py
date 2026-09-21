@@ -4,20 +4,36 @@ from decimal import Decimal
 from django.utils import timezone
 from .models import Payment
 from bookings.models import Booking
+from accounts.settings_helper import BusinessSettingsHelper
 
 
 class ReceiptGenerator:
     """
     Receipt & Invoice Generator for Friends Turf.
     Generates human-friendly, official branded receipts containing:
-    - Business Details (Name, Address, GSTIN, Support Email/Phone)
+    - Business Details (Name, Address, GSTIN, Support Email/Phone) dynamically from BusinessSetting
     - Receipt ID (REC-26-XXXXX)
     - Booking Reference (FT-26-XXXXX)
     - Pitch & Timing Details
-    - Financial & Tax Breakdown (Base, Adjustments, Discounts, 18% GST, Amount Paid, Balance Due)
+    - Financial & Tax Breakdown (Base, Adjustments, Discounts, GST, Amount Paid, Balance Due)
     - Payment Mode (Online Razorpay vs Offline Cash/UPI/Card)
     """
 
+    @classmethod
+    def get_business_info(cls):
+        comp = BusinessSettingsHelper.get_company_settings()
+        return {
+            "company_name": comp.get("name", "Friends Turf Sports Arena"),
+            "brand_name": comp.get("name", "Friends Turf"),
+            "tagline": comp.get("tagline", "PLAY HARD. BOOK DIRECT. OWN THE PITCH."),
+            "address": comp.get("address", "Near Sirupooluvapatti, Kamatchepuram, Tiruppur, Tamil Nadu 641603 (RTO Office Backside)"),
+            "gstin": comp.get("gstin", "33ABCDE1234F1Z5"),
+            "email": comp.get("support_email", comp.get("email", "support@friendsturf.com")),
+            "phone": comp.get("phone", "+91 93619 89494"),
+            "website": comp.get("website", "https://friendsturf.com"),
+        }
+
+    # Backward compatibility property
     BUSINESS_INFO = {
         "company_name": "Friends Turf Sports Arena",
         "brand_name": "Friends Turf",
@@ -61,7 +77,7 @@ class ReceiptGenerator:
         return {
             "receipt_number": receipt_no,
             "issued_at": (payment.paid_at or payment.created_at or timezone.now()).isoformat(),
-            "business": cls.BUSINESS_INFO,
+            "business": cls.get_business_info(),
             "customer": {
                 "name": customer.full_name or customer.first_name or customer.email.split("@")[0],
                 "email": customer.email,

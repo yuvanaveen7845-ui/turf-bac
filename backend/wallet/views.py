@@ -9,6 +9,7 @@ from .serializers import WalletTransactionSerializer
 from accounts.models import User
 from accounts.permissions import IsAdmin
 from notifications.models import Notification
+from accounts.settings_helper import BusinessSettingsHelper
 
 
 class WalletDetailView(views.APIView):
@@ -52,11 +53,12 @@ class WalletCreateRazorpayOrderView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        min_topup = Decimal(str(BusinessSettingsHelper.get_payment_settings().get("minTopUpAmount", 10.0)))
         try:
             amount = Decimal(str(amount_input))
-            if amount < Decimal("10.00"):
+            if amount < min_topup:
                 return Response(
-                    {"error": "Minimum top-up amount is ₹10."},
+                    {"error": f"Minimum top-up amount is ₹{min_topup:.0f}."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
         except Exception:
@@ -241,7 +243,10 @@ class WalletVerifyRazorpayPaymentView(views.APIView):
 
 
 class WalletTopUpView(views.APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    """
+    Direct wallet balance adjustment endpoint (Restricted to Admin for balance management).
+    """
+    permission_classes = [IsAdmin]
 
     def post(self, request):
         amount = Decimal(str(request.data.get("amount", "0.00")))

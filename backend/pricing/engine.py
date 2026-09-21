@@ -3,10 +3,16 @@ from decimal import Decimal
 from django.db.models import Q
 from django.utils import timezone
 from .models import PricingRule, Holiday, SpecialEvent
+from accounts.settings_helper import BusinessSettingsHelper
 
 
 class PricingEngine:
-    TAX_RATE_PERCENTAGE = Decimal("18.00")  # Standard 18% GST
+    @classmethod
+    def get_tax_rate_percentage(cls) -> Decimal:
+        return BusinessSettingsHelper.get_tax_rate_percentage()
+
+    # Backward compatibility property/attribute alias
+    TAX_RATE_PERCENTAGE = Decimal("18.00")
 
     @classmethod
     def get_pricing_context(cls, turf=None, date_obj=None):
@@ -121,8 +127,9 @@ class PricingEngine:
                 {"name": rule.name, "type": rule.rule_type, "amount": float(adjustment)}
             )
 
-        # Avoid negative price
-        final_slot_price = max(Decimal("100.00"), current_price)
+        # Dynamic floor price from settings
+        min_slot_price = Decimal(str(BusinessSettingsHelper.get_payment_settings().get("minSlotPrice", 100.0)))
+        final_slot_price = max(min_slot_price, current_price)
 
         return {
             "base_price": float(base_price),
@@ -148,8 +155,8 @@ class PricingEngine:
         - Base amount for all slots + rule adjustments
         - Subtotal
         - Coupon discount
-        - Membership discount
-        - Tax amount (GST)
+        - Membership discount (dynamic from active MembershipPlan)
+        - Tax amount (GST dynamically from BusinessSetting)
         - Final total
         - Explicit discounts & manual price overrides (with role authorization)
         """
@@ -191,27 +198,43 @@ class PricingEngine:
         subtotal = total_base + total_adjustments
         discount_sources = []
 
-        # Membership discount
+        # Dynamic Membership discount from active subscription or MembershipPlan
         membership_discount = Decimal("0.00")
-        if user and hasattr(user, "customer_profile"):
-            tier = user.customer_profile.membership_tier.upper()
-            if tier == "PLATINUM":
-                membership_discount = round(
-                    (subtotal * Decimal("15.00")) / Decimal("100.00"), 2
-                )
-            elif tier == "GOLD":
-                membership_discount = round(
-                    (subtotal * Decimal("10.00")) / Decimal("100.00"), 2
-                )
-            elif tier == "SILVER":
-                membership_discount = round(
-                    (subtotal * Decimal("5.00")) / Decimal("100.00"), 2
-                )
+        membership_label = ""
+        if user and user.is_authenticated:
+            # Check active subscription
+            from memberships.models import CustomerMembership, MembershipPlan
+            active_membership = CustomerMembership.objects.filter(
+                customer=user, status="ACTIVE", end_date__gte=timezone.now().date()
+            ).select_related("plan").first()
+
+            if active_membership and active_membership.plan:
+                plan = active_membership.plan
+                pct = Decimal(str(plan.discount_percentage))
+                if pct > 0:
+                    membership_discount = round((subtotal * pct) / Decimal("100.00"), 2)
+                    membership_label = f"{plan.name} Member ({pct}% Off)"
+            elif hasattr(user, "customer_profile"):
+                tier = user.customer_profile.membership_tier.strip().upper()
+                plan = MembershipPlan.objects.filter(slug__iexact=tier, is_active=True).first()
+                if plan and plan.discount_percentage > 0:
+                    pct = Decimal(str(plan.discount_percentage))
+                    membership_discount = round((subtotal * pct) / Decimal("100.00"), 2)
+                    membership_label = f"{plan.name} Tier ({pct}% Off)"
+                elif tier == "PLATINUM":
+                    membership_discount = round((subtotal * Decimal("15.00")) / Decimal("100.00"), 2)
+                    membership_label = "Platinum Tier (15% Off)"
+                elif tier == "GOLD":
+                    membership_discount = round((subtotal * Decimal("10.00")) / Decimal("100.00"), 2)
+                    membership_label = "Gold Tier (10% Off)"
+                elif tier == "SILVER":
+                    membership_discount = round((subtotal * Decimal("5.00")) / Decimal("100.00"), 2)
+                    membership_label = "Silver Tier (5% Off)"
 
         if membership_discount > Decimal("0.00"):
             discount_sources.append({
                 "source": "MEMBERSHIP",
-                "label": f"Membership Tier ({tier})",
+                "label": membership_label or "Membership Discount",
                 "amount": float(membership_discount),
             })
 
@@ -252,8 +275,11 @@ class PricingEngine:
 
         total_discount = membership_discount + coupon_discount + admin_discount
         taxable_amount = max(Decimal("0.00"), subtotal - total_discount)
+        
+        # Dynamic tax rate percentage from BusinessSetting
+        tax_rate = cls.get_tax_rate_percentage()
         tax_amount = round(
-            (taxable_amount * cls.TAX_RATE_PERCENTAGE) / Decimal("100.00"), 2
+            (taxable_amount * tax_rate) / Decimal("100.00"), 2
         )
         calculated_final = taxable_amount + tax_amount
 

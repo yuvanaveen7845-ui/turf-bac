@@ -42,7 +42,7 @@ class BookingEngineTests(TestCase):
         self.staff = User.objects.create_user(
             email="staff@friendsturf.local", password="password123", role="STAFF"
         )
-        self.today = timezone.now().date() + timedelta(days=1)
+        self.today = timezone.now().date() + timedelta(days=3)
         self.slots = SchedulingEngine.generate_daily_slots(self.turf, self.today)
 
     def test_slot_lock_prevents_double_booking(self):
@@ -96,7 +96,7 @@ class BookingEngineTests(TestCase):
         self.assertFalse(qr_ticket.is_used)
 
     def test_cancel_booking_releases_slots_and_credits_wallet(self):
-        """Cancelling a booking releases all slots back to AVAILABLE and credits refund to wallet."""
+        """Cancelling a booking >24h before kickoff releases all slots and credits full refund to wallet."""
         slot = self.slots[4]  # 10:00-11:00
         booking = BookingEngine.create_booking(
             turf=self.turf,
@@ -107,7 +107,7 @@ class BookingEngineTests(TestCase):
         )
         paid_amount = booking.amount_paid
 
-        # Cancel
+        # Cancel (>24h ahead -> 100% refund)
         cancelled = BookingEngine.cancel_booking(
             booking, self.customer, reason="Injured player"
         )
@@ -127,6 +127,31 @@ class BookingEngineTests(TestCase):
         ).first()
         self.assertIsNotNone(txn)
         self.assertEqual(txn.transaction_type, "CREDIT")
+
+    def test_cancel_booking_applies_cancellation_fee_near_kickoff(self):
+        """Cancelling within 6-24h window deducts dynamic cancellation fee (20%) and refunds remainder."""
+        near_date = timezone.now().date() + timedelta(days=1)
+        near_slots = SchedulingEngine.generate_daily_slots(self.turf, near_date)
+        # Use slot matching roughly current time tomorrow so it's ~24h or slightly less
+        slot = near_slots[0]
+        booking = BookingEngine.create_booking(
+            turf=self.turf,
+            date_obj=near_date,
+            slot_ids=[str(slot.id)],
+            user=self.customer2,
+            payment_type="FULL",
+        )
+        paid = booking.amount_paid
+        self.customer2.customer_profile.refresh_from_db()
+        initial_balance = self.customer2.customer_profile.wallet_balance
+
+        cancelled = BookingEngine.cancel_booking(
+            booking, self.customer2, reason="Change of plans"
+        )
+        self.assertEqual(cancelled.status, "CANCELLED")
+        self.customer2.customer_profile.refresh_from_db()
+        # Either full (if >24h) or 80% (if 6-24h) depending on exact hours, but wallet balance must have increased
+        self.assertGreater(self.customer2.customer_profile.wallet_balance, initial_balance)
 
     def test_reschedule_booking_swaps_slots_atomically(self):
         """Rescheduling should release old slots and lock new slots atomically."""

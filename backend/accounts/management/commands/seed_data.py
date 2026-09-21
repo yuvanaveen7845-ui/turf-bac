@@ -518,8 +518,8 @@ class Command(BaseCommand):
             final_amount=Decimal("1486.80"),
             amount_paid=Decimal("1486.80"),
             balance_due=Decimal("0.00"),
-            checked_in_at=datetime.combine(past_date, time(17, 55)),
-            completed_at=datetime.combine(past_date, time(19, 5)),
+            checked_in_at=timezone.make_aware(datetime.combine(past_date, time(17, 55))),
+            completed_at=timezone.make_aware(datetime.combine(past_date, time(19, 5))),
         )
         b3.slots.add(slot_past)
         QRService.generate_qr_for_booking(b3)

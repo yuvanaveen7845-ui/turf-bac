@@ -3,25 +3,33 @@ Friends Turf — Official Branded Responsive HTML Email Templates
 Adheres strictly to Friends Turf Brand Design Guidelines (Emerald #059669, Slate #0F172A).
 """
 from django.conf import settings
+from accounts.settings_helper import BusinessSettingsHelper
 
 
-BRAND_ASSETS = {
-    "logo_url": "https://friendsturf.com/logo.png",
-    "brand_name": "Friends Turf",
-    "tagline": "PLAY HARD. BOOK DIRECT. OWN THE PITCH.",
-    "company_address": "Near Sirupooluvapatti, Kamatchepuram, Tiruppur, TN 641603 (RTO Office Backside)",
-    "support_email": "support@friendsturf.com",
-    "support_phone": "+91 93619 89494",
-    "website_url": "https://friendsturf.com",
-    "primary_color": "#059669",
-    "primary_hover": "#047857",
-    "dark_color": "#0F172A",
-    "bg_subtle": "#F8FAFC",
-}
+def get_brand_assets():
+    comp = BusinessSettingsHelper.get_company_settings()
+    return {
+        "logo_url": comp.get("logo_url", "https://friendsturf.com/logo.png"),
+        "brand_name": comp.get("name", "Friends Turf"),
+        "tagline": comp.get("tagline", "PLAY HARD. BOOK DIRECT. OWN THE PITCH."),
+        "company_address": comp.get("address", "Near Sirupooluvapatti, Kamatchepuram, Tiruppur, TN 641603 (RTO Office Backside)"),
+        "support_email": comp.get("support_email", comp.get("email", "support@friendsturf.com")),
+        "support_phone": comp.get("phone", "+91 93619 89494"),
+        "website_url": comp.get("website", "https://friendsturf.com"),
+        "primary_color": "#059669",
+        "primary_hover": "#047857",
+        "dark_color": "#0F172A",
+        "bg_subtle": "#F8FAFC",
+    }
+
+
+# Fallback dictionary for backwards compatibility
+BRAND_ASSETS = get_brand_assets()
 
 
 def _base_email_wrapper(title: str, preheader: str, content_html: str) -> str:
     """Universal branded email wrapper with header logo and compliance footer."""
+    assets = get_brand_assets()
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -47,12 +55,12 @@ def _base_email_wrapper(title: str, preheader: str, content_html: str) -> str:
           
           <!-- Header Banner -->
           <tr>
-            <td style="background-color: {BRAND_ASSETS['primary_color']}; padding: 32px 36px; text-align: center;">
+            <td style="background-color: {assets['primary_color']}; padding: 32px 36px; text-align: center;">
               <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0">
                 <tr>
                   <td align="center">
                     <div style="display: inline-block; background-color: rgba(255, 255, 255, 0.2); padding: 8px 16px; border-radius: 12px; margin-bottom: 8px;">
-                      <span style="color: #FFFFFF; font-weight: 900; font-size: 20px; letter-spacing: 1px;">FRIENDS TURF</span>
+                      <span style="color: #FFFFFF; font-weight: 900; font-size: 20px; letter-spacing: 1px;">{assets['brand_name'].upper()}</span>
                     </div>
                     <div style="color: #ECFDF5; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px;">
                       FIFA Pro Sports Complex • Tiruppur
@@ -72,16 +80,16 @@ def _base_email_wrapper(title: str, preheader: str, content_html: str) -> str:
 
           <!-- Footer -->
           <tr>
-            <td style="background-color: {BRAND_ASSETS['bg_subtle']}; padding: 28px 36px; border-top: 1px solid #E2E8F0; text-align: center;">
-              <p style="margin: 0 0 6px 0; font-size: 12px; font-weight: 700; color: {BRAND_ASSETS['dark_color']};">
-                {BRAND_ASSETS['brand_name']} Sports Arena
+            <td style="background-color: {assets['bg_subtle']}; padding: 28px 36px; border-top: 1px solid #E2E8F0; text-align: center;">
+              <p style="margin: 0 0 6px 0; font-size: 12px; font-weight: 700; color: {assets['dark_color']};">
+                {assets['brand_name']} Sports Arena
               </p>
               <p style="margin: 0 0 12px 0; font-size: 11px; color: #64748B; line-height: 1.5;">
-                {BRAND_ASSETS['company_address']}<br>
-                Support: {BRAND_ASSETS['support_phone']} | {BRAND_ASSETS['support_email']}
+                {assets['company_address']}<br>
+                Support: {assets['support_phone']} | {assets['support_email']}
               </p>
               <p style="margin: 0; font-size: 10px; color: #94A3B8;">
-                © 2026 Friends Turf Arena LLP. All rights reserved. Optical gate passes are cryptographically verified.
+                © 2026 {assets['brand_name']} Arena LLP. All rights reserved. Optical gate passes are cryptographically verified.
               </p>
             </td>
           </tr>

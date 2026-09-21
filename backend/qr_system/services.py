@@ -9,9 +9,18 @@ from django.utils import timezone
 from django.db import transaction
 from .models import QRCredential, CheckIn
 from bookings.models import Booking
+from accounts.settings_helper import BusinessSettingsHelper
 
 
 class QRService:
+    @classmethod
+    def get_open_minutes(cls) -> int:
+        return BusinessSettingsHelper.get_checkin_open_minutes()
+
+    @classmethod
+    def get_grace_minutes(cls) -> int:
+        return BusinessSettingsHelper.get_checkin_grace_minutes()
+
     CHECK_IN_OPEN_MINUTES = 30
     CHECK_IN_GRACE_MINUTES = 30
 
@@ -34,8 +43,8 @@ class QRService:
         start_dt = timezone.make_aware(start_naive, local_tz)
         end_dt = timezone.make_aware(end_naive, local_tz)
 
-        valid_from = start_dt - timedelta(minutes=cls.CHECK_IN_OPEN_MINUTES)
-        valid_until = end_dt + timedelta(minutes=cls.CHECK_IN_GRACE_MINUTES)
+        valid_from = start_dt - timedelta(minutes=cls.get_open_minutes())
+        valid_until = end_dt + timedelta(minutes=cls.get_grace_minutes())
 
         # Check existing credential
         credential = getattr(booking, "qr_credential", None)
@@ -255,8 +264,8 @@ class QRService:
         start_dt = timezone.make_aware(start_naive, local_tz)
         end_dt = timezone.make_aware(end_naive, local_tz)
 
-        checkin_open_dt = start_dt - timedelta(minutes=cls.CHECK_IN_OPEN_MINUTES)
-        checkin_close_dt = end_dt + timedelta(minutes=cls.CHECK_IN_GRACE_MINUTES)
+        checkin_open_dt = start_dt - timedelta(minutes=cls.get_open_minutes())
+        checkin_close_dt = end_dt + timedelta(minutes=cls.get_grace_minutes())
 
         if booking.date < today and not is_override:
             CheckIn.objects.create(

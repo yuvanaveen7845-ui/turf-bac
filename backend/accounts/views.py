@@ -855,73 +855,27 @@ class BusinessSettingsView(views.APIView):
     Persists and retrieves platform business settings:
     Company info, booking rules, operating hours, payment config, turnstile rules, and reminders.
     """
-    permission_classes = [permissions.IsAuthenticated]
-
-    DEFAULT_SETTINGS = {
-        "company": {
-            "name": "Friends Turf",
-            "tagline": "PLAY HARD. BOOK DIRECT. OWN THE PITCH.",
-            "address": "Near Sirupooluvapatti, Kamatchepuram, Tiruppur, Tamil Nadu 641603 (RTO Office Backside)",
-            "phone": "+91 93619 89494",
-            "email": "contact@friendsturf.com",
-            "website": "https://friendsturf.com",
-            "instagram": "@friendsturf_tiruppur",
-            "whatsapp": "+91 93639 89494",
-            "timezone": "Asia/Kolkata",
-            "currency": "INR",
-        },
-        "booking": {
-            "advanceBookingDays": 14,
-            "minDurationMinutes": 60,
-            "maxDurationMinutes": 180,
-            "slotHoldMinutes": 5,
-            "cancellationFullRefundHours": 24,
-            "cancellationPartialRefundHours": 12,
-            "partialRefundPercent": 50,
-            "allowRescheduling": True,
-            "rescheduleCutoffHours": 6,
-        },
-        "hours": {
-            "openTime": "06:00",
-            "closeTime": "23:00",
-            "slotDurationMinutes": 60,
-            "bufferTimeMinutes": 0,
-            "allowMidnightBookings": False,
-        },
-        "payments": {
-            "gateway": "RAZORPAY",
-            "mode": "TEST",
-            "upiId": "friendsturf@okhdfcbank",
-            "enableSplitDeposit": True,
-            "advanceDepositPercent": 50,
-            "taxPercentage": 18,
-            "isTaxIncluded": True,
-        },
-        "checkin": {
-            "windowOpenMinutes": 30,
-            "gracePeriodMinutes": 30,
-            "allowManualOverride": True,
-            "requireOverrideReason": True,
-        },
-        "notifications": {
-            "sendConfirmationImmediately": True,
-            "reminder24h": True,
-            "reminder2h": True,
-            "postMatchFeedbackHours": 2,
-        },
-        "features": DEFAULT_FEATURE_FLAGS,
-    }
+    def get_permissions(self):
+        if self.request.method == "GET":
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
 
     def get(self, request):
         from .models import BusinessSetting
+        from .settings_helper import DEFAULT_BUSINESS_SETTINGS
         settings_dict = {}
-        for section, defaults in self.DEFAULT_SETTINGS.items():
+        for section, defaults in DEFAULT_BUSINESS_SETTINGS.items():
             record = BusinessSetting.objects.filter(key=section).first()
             if record and isinstance(record.value, dict):
                 merged = {**defaults, **record.value}
                 settings_dict[section] = merged
             else:
                 settings_dict[section] = defaults
+        # Include feature flags in response
+        features_record = BusinessSetting.objects.filter(key="features").first()
+        settings_dict["features"] = (
+            features_record.value if features_record and isinstance(features_record.value, dict) else DEFAULT_FEATURE_FLAGS
+        )
         return Response(settings_dict)
 
     def post(self, request):

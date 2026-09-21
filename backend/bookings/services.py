@@ -13,20 +13,29 @@ from notifications.models import Notification
 from notifications.services import EmailNotificationService
 from wallet.models import WalletTransaction
 from audit.models import AuditLog
+from accounts.settings_helper import BusinessSettingsHelper
+from payments.cancellation import CancellationPolicyEngine
 
 
 class BookingEngine:
+    @classmethod
+    def get_lock_duration_minutes(cls) -> int:
+        return BusinessSettingsHelper.get_slot_lock_duration_minutes()
+
+    # Fallback attribute for backward compatibility
     LOCK_DURATION_MINUTES = 5
 
     @classmethod
     def lock_slots(cls, turf, date_obj, slot_ids, user):
         """
-        Temporarily locks slots during checkout for 5 minutes with atomic row-level locking.
+        Temporarily locks slots during checkout with dynamic lock duration (default 5 mins)
+        with atomic row-level locking.
         Validates contiguous time slots to ensure accurate match duration without gaps.
         Prevents race conditions and double-booking.
         """
         now = timezone.now()
-        lock_until = now + timedelta(minutes=cls.LOCK_DURATION_MINUTES)
+        duration_mins = cls.get_lock_duration_minutes()
+        lock_until = now + timedelta(minutes=duration_mins)
 
         with transaction.atomic():
             # Use select_for_update to lock rows and prevent concurrent overwrites
@@ -95,7 +104,7 @@ class BookingEngine:
         return True, {
             "locked_until": lock_until.isoformat(),
             "expires_at": lock_until.isoformat(),
-            "lock_duration_seconds": cls.LOCK_DURATION_MINUTES * 60,
+            "lock_duration_seconds": duration_mins * 60,
             "slot_ids": [str(s.id) for s in slots],
             "locked_slots": [
                 {
@@ -212,7 +221,8 @@ class BookingEngine:
                 balance = Decimal("0.00")
                 b_status = "CONFIRMED"
             elif payment_type == "PARTIAL":
-                amt_paid = round(final_amt * Decimal("0.50"), 2)  # 50% advance deposit
+                deposit_fraction = BusinessSettingsHelper.get_advance_deposit_fraction()
+                amt_paid = round(final_amt * deposit_fraction, 2)
                 balance = final_amt - amt_paid
                 b_status = "CONFIRMED"
             else:
@@ -329,8 +339,12 @@ class BookingEngine:
                 slot.locked_by = None
                 slot.save()
 
-            # Process refund to customer wallet if amount was paid
-            refund_amount = Decimal(str(booking.amount_paid))
+            # Process dynamic refund to customer wallet based on cancellation policy lead time
+            cancellation_calc = CancellationPolicyEngine.calculate_refund(booking)
+            refund_amount = Decimal(str(cancellation_calc["refundable_amount"]))
+            cancellation_fee = Decimal(str(cancellation_calc["cancellation_fee"]))
+            policy_rule = cancellation_calc.get("policy_rule", "Cancellation Policy")
+
             if refund_amount > 0:
                 if hasattr(booking.customer, "customer_profile"):
                     prof = booking.customer.customer_profile
@@ -344,19 +358,22 @@ class BookingEngine:
                         transaction_type="CREDIT",
                         source="REFUND",
                         reference_id=booking.booking_id,
-                        description=f"Refund for cancelled match {booking.booking_id}",
+                        description=f"Refund for cancelled match {booking.booking_id} ({policy_rule})",
                         balance_after=prof.wallet_balance,
                     )
 
             # Send Notification & Audit
+            fee_note = f" (Fee of ₹{cancellation_fee} applied: {policy_rule})" if cancellation_fee > 0 else ""
             Notification.objects.create(
                 user=booking.customer,
                 notification_type="BOOKING_CANCELLED",
                 title=f"Booking Cancelled ({booking.booking_id})",
-                message=f"Booking for {booking.turf.name} on {booking.date} cancelled. Refund of ₹{refund_amount} credited to your wallet.",
+                message=f"Booking for {booking.turf.name} on {booking.date} cancelled. Refund of ₹{refund_amount} credited to your wallet{fee_note}.",
                 data={
                     "booking_id": booking.booking_id,
                     "refund_amount": float(refund_amount),
+                    "cancellation_fee": float(cancellation_fee),
+                    "policy_rule": policy_rule,
                 },
             )
 
@@ -365,7 +382,12 @@ class BookingEngine:
                 action="BOOKING_CANCELLED",
                 resource_type="BOOKING",
                 resource_id=booking.booking_id,
-                details={"reason": reason, "refund": float(refund_amount)},
+                details={
+                    "reason": reason,
+                    "refund": float(refund_amount),
+                    "fee": float(cancellation_fee),
+                    "policy": policy_rule,
+                },
             )
 
         return booking

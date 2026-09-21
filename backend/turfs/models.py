@@ -107,6 +107,7 @@ class TimeSlot(models.Model):
 
     class Meta:
         ordering = ["date", "start_time"]
+        unique_together = ("turf", "date", "start_time")
         indexes = [
             models.Index(fields=["turf", "date", "status"]),
         ]

@@ -426,6 +426,22 @@ class Command(BaseCommand):
             Coupon.objects.get_or_create(code=cp["code"], defaults=cp)
 
         # 7. Generate Slots for Today and Next 7 Days
+        from django.db.models import Count
+        dup_groups = (
+            TimeSlot.objects.values("turf", "date", "start_time")
+            .annotate(c=Count("id"))
+            .filter(c__gt=1)
+        )
+        for d in dup_groups:
+            slots = list(
+                TimeSlot.objects.filter(
+                    turf_id=d["turf"], date=d["date"], start_time=d["start_time"]
+                ).order_by("id")
+            )
+            slots.sort(key=lambda s: 0 if s.status != "AVAILABLE" else 1)
+            to_delete = [s.id for s in slots[1:]]
+            TimeSlot.objects.filter(id__in=to_delete).delete()
+
         today = timezone.now().date()
         for offset in range(8):
             day = today + timedelta(days=offset)

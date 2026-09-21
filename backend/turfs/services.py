@@ -58,6 +58,12 @@ class SchedulingEngine:
         end_limit = turf.operating_hours_end
         duration_minutes = turf.slot_duration_minutes or 60
 
+        existing_start_times = set(
+            TimeSlot.objects.filter(turf=turf, date=date_obj).values_list(
+                "start_time", flat=True
+            )
+        )
+
         new_slots = []
         while True:
             slot_start_dt = datetime.combine(date_obj, cur_time)
@@ -67,16 +73,17 @@ class SchedulingEngine:
             if slot_end_time > end_limit and slot_end_dt.date() == date_obj:
                 break
 
-            new_slots.append(
-                TimeSlot(
-                    turf=turf,
-                    date=date_obj,
-                    start_time=cur_time,
-                    end_time=slot_end_time,
-                    status="AVAILABLE",
-                    price=turf.base_price,
+            if cur_time not in existing_start_times:
+                new_slots.append(
+                    TimeSlot(
+                        turf=turf,
+                        date=date_obj,
+                        start_time=cur_time,
+                        end_time=slot_end_time,
+                        status="AVAILABLE",
+                        price=turf.base_price,
+                    )
                 )
-            )
 
             if slot_end_time >= end_limit or slot_end_dt.date() > date_obj:
                 break

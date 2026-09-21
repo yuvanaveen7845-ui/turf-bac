@@ -22,6 +22,11 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.stdout.write(self.style.NOTICE("Seeding Friends Turf database..."))
 
+        from pricing.models import PricingRule, Holiday
+        from promotions.models import Coupon, ReferralReward
+        from memberships.models import MembershipPlan, CustomerMembership
+
+
         # 1. Facilities
         facilities_data = [
             {

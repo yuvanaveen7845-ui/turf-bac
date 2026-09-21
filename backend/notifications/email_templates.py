@@ -103,7 +103,7 @@ def _base_email_wrapper(title: str, preheader: str, content_html: str) -> str:
 """
 
 
-def render_booking_confirmation_email(booking, qr_base64: str = "", frontend_url: str = "") -> str:
+def render_booking_confirmation_email(booking, qr_image_src: str = "cid:match_pass_qr", frontend_url: str = "") -> str:
     """
     Branded Match Pass & Booking Confirmation HTML email.
     Includes high-res QR code, match details, player name, venue specs, and directions.
@@ -123,16 +123,49 @@ def render_booking_confirmation_email(booking, qr_base64: str = "", frontend_url
     balance_due = float(booking.balance_due or 0)
     total_amount = float(booking.final_amount or booking.total_amount or (amount_paid + balance_due))
 
-    qr_img_tag = (
-        f'<img src="{qr_base64}" alt="Match Pass QR #{booking_id}" width="190" height="190" style="display: block; margin: 0 auto; border-radius: 12px; border: 1px solid #E2E8F0; background-color: #FFFFFF; padding: 6px;" />'
-        if qr_base64
-        else f'<div style="padding: 30px 20px; background-color: #F8FAFC; border-radius: 12px; font-weight: bold; font-size: 13px; color: #64748B; border: 1px dashed #CBD5E1;">Pass Ready in Digital Portal (#{booking_id})</div>'
-    )
+    has_balance = balance_due > 0
+    img_src = qr_image_src or "cid:match_pass_qr"
+
+    if has_balance:
+        qr_section_html = f"""
+        <div style="text-align: center; margin-bottom: 24px; padding: 20px; background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 16px;">
+          <div style="display: inline-block; background-color: #FFFBEB; border: 1px solid #FDE68A; color: #B45309; font-size: 10px; font-weight: 800; text-transform: uppercase; padding: 3px 10px; border-radius: 9999px; letter-spacing: 0.5px; margin-bottom: 12px;">
+            Advance Deposit Confirmed • ₹{balance_due:,.2f} Due at Venue
+          </div>
+          <span style="font-size: 11px; font-weight: 800; text-transform: uppercase; color: #0F172A; display: block; letter-spacing: 1px; margin-bottom: 10px;">
+            OPTICAL GATE SCANNER PASS
+          </span>
+          <img src="{img_src}" alt="Match Pass QR #{booking_id}" width="190" height="190" style="display: block; margin: 0 auto; border-radius: 12px; border: 1px solid #E2E8F0; background-color: #FFFFFF; padding: 6px;" />
+          <span style="font-size: 12px; font-weight: 800; color: #059669; display: block; margin-top: 10px; font-family: monospace; letter-spacing: 1px;">
+            PASS CODE: {booking_id}
+          </span>
+          <span style="font-size: 10px; color: #64748B; display: block; margin-top: 4px;">
+            Present at venue reception desk to settle remaining balance & activate turnstile admission
+          </span>
+        </div>
+        """
+        cta_button_text = f"Settle ₹{balance_due:,.2f} Online & View Pass →"
+    else:
+        qr_section_html = f"""
+        <div style="text-align: center; margin-bottom: 24px; padding: 20px; background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 16px;">
+          <span style="font-size: 11px; font-weight: 800; text-transform: uppercase; color: #0F172A; display: block; letter-spacing: 1px; margin-bottom: 12px;">
+            OPTICAL GATE SCANNER CODE
+          </span>
+          <img src="{img_src}" alt="Match Pass QR #{booking_id}" width="190" height="190" style="display: block; margin: 0 auto; border-radius: 12px; border: 1px solid #E2E8F0; background-color: #FFFFFF; padding: 6px;" />
+          <span style="font-size: 12px; font-weight: 800; color: #059669; display: block; margin-top: 10px; font-family: monospace; letter-spacing: 1px;">
+            PASS CODE: {booking_id}
+          </span>
+          <span style="font-size: 10px; color: #94A3B8; display: block; margin-top: 4px;">
+            Hold 4-6 inches from turnstile scanner for gate admission
+          </span>
+        </div>
+        """
+        cta_button_text = "Open Digital Match Pass →"
 
     payment_status_badge = (
         '<span style="display: inline-block; background-color: #ECFDF5; border: 1px solid #A7F3D0; color: #059669; font-size: 11px; font-weight: 800; text-transform: uppercase; padding: 4px 10px; border-radius: 6px;">100% Fully Settled</span>'
-        if balance_due <= 0
-        else f'<span style="display: inline-block; background-color: #FFFBEB; border: 1px solid #FDE68A; color: #B45309; font-size: 11px; font-weight: 800; text-transform: uppercase; padding: 4px 10px; border-radius: 6px;">₹{balance_due:,.0f} Due at Venue</span>'
+        if not has_balance
+        else f'<span style="display: inline-block; background-color: #FFFBEB; border: 1px solid #FDE68A; color: #B45309; font-size: 11px; font-weight: 800; text-transform: uppercase; padding: 4px 10px; border-radius: 6px;">₹{balance_due:,.2f} Due at Venue</span>'
     )
 
     content = f"""
@@ -198,7 +231,7 @@ def render_booking_confirmation_email(booking, qr_base64: str = "", frontend_url
                   <div style="margin-top: 4px;">
                     {payment_status_badge}
                   </div>
-                  <span style="font-size: 11px; color: #64748B; display: block; margin-top: 4px;">Paid: <strong>₹{amount_paid:,.0f}</strong> / Total: <strong>₹{total_amount:,.0f}</strong></span>
+                  <span style="font-size: 11px; color: #64748B; display: block; margin-top: 4px;">Paid: <strong>₹{amount_paid:,.2f}</strong> / Total: <strong>₹{total_amount:,.2f}</strong></span>
                 </td>
               </tr>
             </table>
@@ -207,18 +240,7 @@ def render_booking_confirmation_email(booking, qr_base64: str = "", frontend_url
       </table>
 
       <!-- Turnstile QR Pass Section -->
-      <div style="text-align: center; margin-bottom: 24px; padding: 20px; background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 16px;">
-        <span style="font-size: 11px; font-weight: 800; text-transform: uppercase; color: #0F172A; display: block; letter-spacing: 1px; margin-bottom: 12px;">
-          OPTICAL GATE SCANNER CODE
-        </span>
-        {qr_img_tag}
-        <span style="font-size: 12px; font-weight: 800; color: #059669; display: block; margin-top: 10px; font-family: monospace; letter-spacing: 1px;">
-          PASS CODE: {booking_id}
-        </span>
-        <span style="font-size: 10px; color: #94A3B8; display: block; margin-top: 4px;">
-          Hold 4-6 inches from turnstile scanner for gate admission
-        </span>
-      </div>
+      {qr_section_html}
 
       <!-- Action Buttons Row -->
       <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-bottom: 16px;">
@@ -228,7 +250,7 @@ def render_booking_confirmation_email(booking, qr_base64: str = "", frontend_url
               <tr>
                 <td align="center" style="border-radius: 12px; background-color: #059669;">
                   <a href="{frontend_url}/confirmation/{booking_id}" target="_blank" style="display: inline-block; background-color: #059669; color: #FFFFFF; font-weight: 800; font-size: 14px; text-decoration: none; padding: 14px 28px; border-radius: 12px; box-shadow: 0 4px 14px rgba(5, 150, 105, 0.35);">
-                    Open Digital Match Pass →
+                    {cta_button_text}
                   </a>
                 </td>
               </tr>

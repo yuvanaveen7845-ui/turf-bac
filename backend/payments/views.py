@@ -71,116 +71,129 @@ class CreateRazorpayOrderView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        slots = list(
-            TimeSlot.objects.filter(id__in=slot_ids, turf=turf, date=date_obj).order_by(
-                "start_time"
+        with transaction.atomic():
+            slots = list(
+                TimeSlot.objects.select_for_update()
+                .filter(id__in=slot_ids, turf=turf, date=date_obj)
+                .order_by("start_time")
             )
-        )
-        if len(slots) != len(slot_ids):
-            return Response(
-                {"error": "One or more selected slots are invalid."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Validate slot availability and locks
-        now = timezone.now()
-        local_now = timezone.localtime(now)
-        local_date = local_now.date()
-        local_time = local_now.time()
-
-        if date_obj < local_date:
-            return Response(
-                {"error": "Cannot reserve time slots for a past date."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        for slot in slots:
-            if date_obj == local_date and slot.start_time <= local_time:
+            if len(slots) != len(slot_ids):
                 return Response(
-                    {
-                        "error": f"Slot {slot.start_time.strftime('%I:%M %p')} has already started or ended. Please choose an upcoming slot."
-                    },
+                    {"error": "One or more selected slots are invalid or no longer available."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        lock_until = now + timezone.timedelta(minutes=5)
+            # Contiguous / consecutive multi-slot validation
+            if len(slots) > 1:
+                for i in range(len(slots) - 1):
+                    if slots[i].end_time != slots[i + 1].start_time:
+                        return Response(
+                            {
+                                "error": f"Selected slots must be consecutive hours ({slots[i].start_time.strftime('%H:%M')}-{slots[i].end_time.strftime('%H:%M')} and {slots[i+1].start_time.strftime('%H:%M')}-{slots[i+1].end_time.strftime('%H:%M')} are not contiguous).",
+                                "code": "NON_CONSECUTIVE_SLOTS",
+                            },
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
 
-        for slot in slots:
-            if slot.status == "BOOKED":
+            # Validate slot availability and locks
+            now = timezone.now()
+            local_now = timezone.localtime(now)
+            local_date = local_now.date()
+            local_time = local_now.time()
+
+            if date_obj < local_date:
                 return Response(
-                    {"error": f"Slot {slot.start_time.strftime('%H:%M')} is already booked."},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            if slot.status == "MAINTENANCE":
-                return Response(
-                    {"error": f"Slot {slot.start_time.strftime('%H:%M')} is under maintenance."},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            if (
-                slot.status == "LOCKED"
-                and not slot.is_lock_expired()
-                and slot.locked_by != request.user
-            ):
-                return Response(
-                    {"error": f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."},
-                    status=status.HTTP_409_CONFLICT,
+                    {"error": "Cannot reserve time slots for a past date."},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # Apply 5-minute lock on slots
-        for slot in slots:
-            slot.status = "LOCKED"
-            slot.locked_until = lock_until
-            slot.locked_by = request.user
-            slot.save()
+            for slot in slots:
+                if date_obj == local_date and slot.start_time <= local_time:
+                    return Response(
+                        {
+                            "error": f"Slot {slot.start_time.strftime('%I:%M %p')} has already started or ended. Please choose an upcoming slot."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
-        # Compute accurate server-side pricing
-        coupon = None
-        if coupon_code:
-            coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
+            lock_until = now + timezone.timedelta(minutes=5)
 
-        slot_items = [{"start_time": s.start_time, "end_time": s.end_time} for s in slots]
-        price_data = PricingEngine.calculate_booking_total(
-            turf=turf,
-            date_obj=date_obj,
-            slot_items=slot_items,
-            coupon=coupon,
-            user=request.user,
-        )
+            for slot in slots:
+                if slot.status == "BOOKED":
+                    return Response(
+                        {"error": f"Slot {slot.start_time.strftime('%H:%M')} is already booked."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if slot.status == "MAINTENANCE":
+                    return Response(
+                        {"error": f"Slot {slot.start_time.strftime('%H:%M')} is under maintenance."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if (
+                    slot.status == "LOCKED"
+                    and not slot.is_lock_expired()
+                    and slot.locked_by != request.user
+                ):
+                    return Response(
+                        {"error": f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
-        final_amt = Decimal(str(price_data["final_amount"]))
-        if payment_type == "FULL":
-            amount_to_charge = final_amt
-        else:
-            # 50% partial deposit
-            amount_to_charge = round(final_amt * Decimal("0.50"), 2)
+            # Apply 5-minute lock on slots
+            for slot in slots:
+                slot.status = "LOCKED"
+                slot.locked_until = lock_until
+                slot.locked_by = request.user
+                slot.save()
 
-        booking_id = Booking.generate_booking_id(date_obj)
-        booking = Booking.objects.create(
-            booking_id=booking_id,
-            customer=request.user,
-            turf=turf,
-            date=date_obj,
-            start_time=slots[0].start_time,
-            end_time=slots[-1].end_time,
-            booking_type="REGULAR",
-            status="PAYMENT_PENDING",
-            total_amount=Decimal(str(price_data["subtotal"])),
-            discount_amount=Decimal(str(price_data["total_discount"])),
-            tax_amount=Decimal(str(price_data["tax_amount"])),
-            final_amount=final_amt,
-            amount_paid=Decimal("0.00"),
-            balance_due=final_amt,
-            coupon_code=coupon.code if coupon else "",
-            pricing_breakdown=price_data,
-            participants=participants or [],
-            notes=notes,
-        )
+            # Compute accurate server-side pricing
+            coupon = None
+            if coupon_code:
+                coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
 
-        # Attach slots to booking
-        for slot in slots:
-            slot.booking_id = booking.booking_id
-            slot.save()
-            booking.slots.add(slot)
+            slot_items = [{"start_time": s.start_time, "end_time": s.end_time} for s in slots]
+            price_data = PricingEngine.calculate_booking_total(
+                turf=turf,
+                date_obj=date_obj,
+                slot_items=slot_items,
+                coupon=coupon,
+                user=request.user,
+            )
+
+            final_amt = Decimal(str(price_data["final_amount"]))
+            if payment_type == "FULL":
+                amount_to_charge = final_amt
+            else:
+                # 50% partial deposit
+                amount_to_charge = round(final_amt * Decimal("0.50"), 2)
+
+            booking_id = Booking.generate_booking_id(date_obj)
+            booking = Booking.objects.create(
+                booking_id=booking_id,
+                customer=request.user,
+                turf=turf,
+                date=date_obj,
+                start_time=slots[0].start_time,
+                end_time=slots[-1].end_time,
+                booking_type="REGULAR",
+                status="PAYMENT_PENDING",
+                total_amount=Decimal(str(price_data["subtotal"])),
+                discount_amount=Decimal(str(price_data["total_discount"])),
+                tax_amount=Decimal(str(price_data["tax_amount"])),
+                final_amount=final_amt,
+                amount_paid=Decimal("0.00"),
+                balance_due=final_amt,
+                coupon_code=coupon.code if coupon else "",
+                pricing_breakdown=price_data,
+                participants=participants or [],
+                notes=notes,
+            )
+
+            # Attach slots to booking
+            for slot in slots:
+                slot.booking_id = booking.booking_id
+                slot.save()
+                booking.slots.add(slot)
 
         # Create Razorpay Order server-side
         try:
@@ -194,8 +207,12 @@ class CreateRazorpayOrderView(views.APIView):
                 },
             )
         except Exception as e:
+            logger.exception("Failed to initialize payment gateway order")
             return Response(
-                {"error": f"Failed to initialize payment gateway: {str(e)}"},
+                {
+                    "error": "Payment gateway is temporarily unavailable. Please try again.",
+                    "code": "PAYMENT_PROVIDER_UNAVAILABLE",
+                },
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
@@ -280,11 +297,8 @@ class VerifyRazorpayPaymentView(views.APIView):
         ).first()
 
         if not payment:
-            payment = Payment.objects.select_for_update().filter(booking=booking).order_by("-created_at").first()
-
-        if not payment:
             return Response(
-                {"error": "No payment intent found for this booking order."},
+                {"error": "No payment intent matching this Razorpay order found for this booking."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
@@ -318,6 +332,73 @@ class VerifyRazorpayPaymentView(views.APIView):
 
         # Payment Verified Successfully
         now = timezone.now()
+        booking = Booking.objects.select_for_update().get(pk=booking.pk)
+
+        # Attack Mitigation: Check if booking was cancelled while checkout was in progress
+        if booking.status in ("CANCELLED", "REFUNDED"):
+            payment.status = "PAID"
+            payment.provider_payment_id = razorpay_payment_id
+            payment.provider_signature = razorpay_signature or ""
+            payment.paid_at = now
+            payment.completed_at = now
+            payment.save()
+
+            if hasattr(booking.customer, "customer_profile"):
+                prof = booking.customer.customer_profile
+                prof.wallet_balance += payment.amount
+                prof.save()
+                WalletTransaction.objects.create(
+                    customer=booking.customer,
+                    amount=payment.amount,
+                    transaction_type="CREDIT",
+                    source="REFUND",
+                    reference_id=booking.booking_id,
+                    description=f"Auto-refund to wallet: payment on cancelled booking {booking.booking_id}",
+                    balance_after=prof.wallet_balance,
+                )
+            return Response(
+                {
+                    "error": "This booking was cancelled. Your payment has been credited to your Turf Cash Wallet.",
+                    "code": "BOOKING_CANCELLED_REFUNDED_TO_WALLET",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Attack Mitigation: Check if slots were claimed by another user after lock expired
+        slot_conflicts = booking.slots.filter(status="BOOKED").exclude(booking_id=booking.booking_id)
+        if slot_conflicts.exists():
+            payment.status = "PAID"
+            payment.provider_payment_id = razorpay_payment_id
+            payment.provider_signature = razorpay_signature or ""
+            payment.paid_at = now
+            payment.completed_at = now
+            payment.save()
+
+            booking.status = "CANCELLED"
+            booking.cancel_reason = "Hold expired and slot claimed by another customer."
+            booking.save()
+
+            if hasattr(booking.customer, "customer_profile"):
+                prof = booking.customer.customer_profile
+                prof.wallet_balance += payment.amount
+                prof.save()
+                WalletTransaction.objects.create(
+                    customer=booking.customer,
+                    amount=payment.amount,
+                    transaction_type="CREDIT",
+                    source="REFUND",
+                    reference_id=booking.booking_id,
+                    description=f"Auto-refund to wallet: slot claimed for {booking.booking_id}",
+                    balance_after=prof.wallet_balance,
+                )
+            return Response(
+                {
+                    "error": "Your hold expired and the pitch was reserved by another customer. Payment has been credited to your Turf Cash Wallet.",
+                    "code": "SLOT_CLAIMED_REFUNDED_TO_WALLET",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         payment.status = "PAID"
         payment.provider_payment_id = razorpay_payment_id
         payment.provider_signature = razorpay_signature or ""
@@ -326,7 +407,7 @@ class VerifyRazorpayPaymentView(views.APIView):
         payment.save()
 
         # Update Booking state to CONFIRMED
-        booking.amount_paid += payment.amount
+        booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
         booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
         booking.status = "CONFIRMED"
         booking.save()
@@ -510,7 +591,13 @@ class VerifyBalanceRazorpayPaymentView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        booking = get_object_or_404(Booking, booking_id=booking_id)
+        booking = Booking.objects.select_for_update().filter(booking_id=booking_id).first()
+        if not booking:
+            return Response(
+                {"error": "Booking not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         if request.user.role == "CUSTOMER" and booking.customer != request.user:
             return Response(
                 {"error": "Unauthorized access to this booking."},
@@ -561,8 +648,8 @@ class VerifyBalanceRazorpayPaymentView(views.APIView):
         payment.completed_at = now
         payment.save()
 
-        # Update booking amounts
-        booking.amount_paid += payment.amount
+        # Update booking amounts with invariant guards
+        booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
         booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
         booking.save()
 
@@ -645,13 +732,25 @@ class WalletBookingPaymentView(views.APIView):
             )
 
         slots = list(
-            TimeSlot.objects.filter(id__in=slot_ids, turf=turf, date=date_obj).order_by("start_time")
+            TimeSlot.objects.select_for_update().filter(id__in=slot_ids, turf=turf, date=date_obj).order_by("start_time")
         )
         if len(slots) != len(slot_ids):
             return Response(
                 {"error": "One or more selected slots are invalid."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # Contiguous / consecutive multi-slot validation
+        if len(slots) > 1:
+            for i in range(len(slots) - 1):
+                if slots[i].end_time != slots[i + 1].start_time:
+                    return Response(
+                        {
+                            "error": f"Selected slots must be consecutive hours ({slots[i].start_time.strftime('%H:%M')}-{slots[i].end_time.strftime('%H:%M')} and {slots[i+1].start_time.strftime('%H:%M')}-{slots[i+1].end_time.strftime('%H:%M')} are not contiguous).",
+                            "code": "NON_CONSECUTIVE_SLOTS",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
 
         for slot in slots:
             if slot.status == "BOOKED":
@@ -686,14 +785,14 @@ class WalletBookingPaymentView(views.APIView):
 
         final_amt = Decimal(str(price_data["final_amount"]))
 
-        # Check wallet balance
-        if not hasattr(request.user, "customer_profile"):
+        # Check and lock customer wallet profile atomically
+        from accounts.models import CustomerProfile
+        prof = CustomerProfile.objects.select_for_update().filter(user=request.user).first()
+        if not prof:
             return Response(
                 {"error": "Customer wallet profile not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-
-        prof = request.user.customer_profile
         if prof.wallet_balance < final_amt:
             return Response(
                 {
@@ -862,8 +961,8 @@ class RazorpayWebhookView(views.APIView):
                     payment.save()
 
                     if payment.booking:
-                        booking = payment.booking
-                        booking.amount_paid += amount
+                        booking = Booking.objects.select_for_update().get(pk=payment.booking.pk)
+                        booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
                         booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
                         booking.status = "CONFIRMED"
                         booking.save()
@@ -1070,21 +1169,23 @@ class ProcessRefundView(views.APIView):
             completed_at=timezone.now(),
         )
 
-        # If refund to wallet, credit customer wallet immediately
-        if refund_to == "WALLET" and hasattr(payment.customer, "customer_profile"):
-            prof = payment.customer.customer_profile
-            prof.wallet_balance += refund_amount
-            prof.save()
+        # If refund to wallet, credit customer wallet immediately with row lock
+        if refund_to == "WALLET":
+            from accounts.models import CustomerProfile
+            prof = CustomerProfile.objects.select_for_update().filter(user=payment.customer).first()
+            if prof:
+                prof.wallet_balance += refund_amount
+                prof.save()
 
-            WalletTransaction.objects.create(
-                customer=payment.customer,
-                amount=refund_amount,
-                transaction_type="CREDIT",
-                source="REFUND",
-                reference_id=refund_id,
-                description=f"Refund for payment {payment.payment_id}",
-                balance_after=prof.wallet_balance,
-            )
+                WalletTransaction.objects.create(
+                    customer=payment.customer,
+                    amount=refund_amount,
+                    transaction_type="CREDIT",
+                    source="REFUND",
+                    reference_id=refund_id,
+                    description=f"Refund for payment {payment.payment_id}",
+                    balance_after=prof.wallet_balance,
+                )
 
         # Update payment status
         total_now_refunded = existing_refunded + refund_amount
@@ -1160,6 +1261,7 @@ class ManualCollectPaymentView(views.APIView):
     - Creates Payment record with status PAID
     - Confirms booking if paid and generates Match Pass
     - Audits payment entry with staff actor
+    - Strictly rejects overpayments exceeding remaining balance
     """
     permission_classes = [IsStaffOrAdmin]
 
@@ -1190,6 +1292,20 @@ class ManualCollectPaymentView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if booking.balance_due <= Decimal("0.00"):
+            return Response(
+                {"error": "This booking is already fully paid. No outstanding balance due."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if amount > booking.balance_due:
+            return Response(
+                {
+                    "error": f"Payment amount ₹{amount} exceeds remaining balance due ₹{booking.balance_due}."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         payment_id = Payment.generate_payment_id()
         txn_ref = transaction_ref or f"OFFLINE-{uuid.uuid4().hex[:10].upper()}"
 
@@ -1213,7 +1329,7 @@ class ManualCollectPaymentView(views.APIView):
             gateway_response={"collected_by": request.user.email, "notes": notes},
         )
 
-        booking.amount_paid += amount
+        booking.amount_paid = min(booking.final_amount, booking.amount_paid + amount)
         booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
 
         if booking.status in ["PAYMENT_PENDING", "PENDING"]:

@@ -48,7 +48,7 @@ DEFAULT_BUSINESS_SETTINGS = {
         "advanceDepositPercent": 50,
         "taxPercentage": 18.0,
         "isTaxIncluded": True,
-        "minSlotPrice": 100.0,
+        "minSlotPrice": 1.0,
         "minTopUpAmount": 10.0,
     },
     "checkin": {

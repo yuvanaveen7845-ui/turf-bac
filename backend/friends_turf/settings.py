@@ -230,9 +230,13 @@ EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() in ("true", "1", "yes
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in ("true", "1", "yes")
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "").strip()
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "").strip()
-DEFAULT_FROM_EMAIL = os.getenv(
-    "DEFAULT_FROM_EMAIL", "Friends Turf <noreply@friendsturf.com>"
-).strip()
+
+# Authoritative default From email matching authenticated identity
+default_from = os.getenv("DEFAULT_FROM_EMAIL", "").strip()
+if not default_from or ("@friendsturf.com" in default_from and EMAIL_HOST_USER and "gmail.com" in EMAIL_HOST.lower() and not EMAIL_HOST_USER.endswith("@friendsturf.com")):
+    default_from = f"Friends Turf <{EMAIL_HOST_USER}>" if EMAIL_HOST_USER else "Friends Turf <noreply@friendsturf.com>"
+
+DEFAULT_FROM_EMAIL = default_from
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 # Default to SMTP backend if host user is configured, otherwise fallback to console backend in dev

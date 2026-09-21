@@ -128,7 +128,7 @@ class PricingEngine:
             )
 
         # Dynamic floor price from settings
-        min_slot_price = Decimal(str(BusinessSettingsHelper.get_payment_settings().get("minSlotPrice", 100.0)))
+        min_slot_price = Decimal(str(BusinessSettingsHelper.get_payment_settings().get("minSlotPrice", 1.0)))
         final_slot_price = max(min_slot_price, current_price)
 
         return {

@@ -126,10 +126,11 @@ class TurfDetailView(views.APIView):
 
     def delete(self, request, pk):
         turf = get_object_or_404(Turf, pk=pk)
-        turf.is_active = False
-        turf.save()
+        turf_name = turf.name
+        turf.delete()
         return Response(
-            {"message": f"Turf {turf.name} deactivated."}, status=status.HTTP_200_OK
+            {"message": f"Turf '{turf_name}' deleted successfully."},
+            status=status.HTTP_200_OK,
         )
 
 

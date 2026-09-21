@@ -3,6 +3,7 @@ import base64
 import hashlib
 import secrets
 import qrcode
+import zoneinfo
 from datetime import datetime, date, timedelta
 from django.conf import settings
 from django.utils import timezone
@@ -10,6 +11,8 @@ from django.db import transaction
 from .models import QRCredential, CheckIn
 from bookings.models import Booking
 from accounts.settings_helper import BusinessSettingsHelper
+
+BUSINESS_TZ = zoneinfo.ZoneInfo("Asia/Kolkata")
 
 
 class QRService:
@@ -32,16 +35,15 @@ class QRService:
         Generates or refreshes a cryptographically secure, tamper-resistant QR credential
         with high error correction (Level H), valid window, and hash indexing.
         """
-        # Calculate validity window
+        # Calculate validity window using explicit Asia/Kolkata business timezone
         now = timezone.now()
-        local_tz = timezone.get_current_timezone()
 
-        # Combine booking date and start/end time into timezone-aware datetimes
+        # Combine booking date and start/end time into timezone-aware datetimes in Asia/Kolkata
         start_naive = datetime.combine(booking.date, booking.start_time)
         end_naive = datetime.combine(booking.date, booking.end_time)
 
-        start_dt = timezone.make_aware(start_naive, local_tz)
-        end_dt = timezone.make_aware(end_naive, local_tz)
+        start_dt = start_naive.replace(tzinfo=BUSINESS_TZ)
+        end_dt = end_naive.replace(tzinfo=BUSINESS_TZ)
 
         valid_from = start_dt - timedelta(minutes=cls.get_open_minutes())
         valid_until = end_dt + timedelta(minutes=cls.get_grace_minutes())
@@ -183,8 +185,7 @@ class QRService:
             }
 
         now = timezone.now()
-        local_tz = timezone.get_current_timezone()
-        today = timezone.localdate()
+        today = now.astimezone(BUSINESS_TZ).date()
 
         # Build booking info payload for UI
         booking_data = {
@@ -258,11 +259,11 @@ class QRService:
                 "booking": booking_data,
             }
 
-        # 4. Check Date and Operating Time Window (using server timezone)
+        # 4. Check Date and Operating Time Window (using authoritative Asia/Kolkata business timezone)
         start_naive = datetime.combine(booking.date, booking.start_time)
         end_naive = datetime.combine(booking.date, booking.end_time)
-        start_dt = timezone.make_aware(start_naive, local_tz)
-        end_dt = timezone.make_aware(end_naive, local_tz)
+        start_dt = start_naive.replace(tzinfo=BUSINESS_TZ)
+        end_dt = end_naive.replace(tzinfo=BUSINESS_TZ)
 
         checkin_open_dt = start_dt - timedelta(minutes=cls.get_open_minutes())
         checkin_close_dt = end_dt + timedelta(minutes=cls.get_grace_minutes())
@@ -371,17 +372,24 @@ class QRService:
                 "booking": booking_data,
             }
 
-        # 6. ATOMIC TRANSACTION: Check Duplicate & Perform Admission
+        # 6. ATOMIC TRANSACTION: Check Duplicate & Perform Admission with Row-Level Lock
         with transaction.atomic():
             locked_booking = (
                 Booking.objects.select_for_update()
                 .filter(id=booking.id)
                 .first()
             )
+            locked_credential = (
+                QRCredential.objects.select_for_update()
+                .filter(id=credential.id)
+                .first()
+                if credential
+                else None
+            )
 
             # Check if another scanner checked in concurrently
             if locked_booking.status == "CHECKED_IN" or (
-                credential and credential.status == "USED"
+                locked_credential and locked_credential.status == "USED"
             ):
                 prior_checkin = (
                     CheckIn.objects.filter(
@@ -405,14 +413,14 @@ class QRService:
                 staff_name = (
                     prior_checkin.staff_user.get_full_name()
                     or prior_checkin.staff_user.email
-                    if prior_checkin
+                    if (prior_checkin and prior_checkin.staff_user)
                     else "Staff"
                 )
 
                 # Record denied duplicate scan
                 CheckIn.objects.create(
                     booking=locked_booking,
-                    qr_credential=credential,
+                    qr_credential=locked_credential or credential,
                     staff_user=staff_user,
                     turf=locked_booking.turf,
                     check_in_time=now,
@@ -441,7 +449,7 @@ class QRService:
             if locked_booking.balance_due > 0 and not is_override:
                 CheckIn.objects.create(
                     booking=locked_booking,
-                    qr_credential=credential,
+                    qr_credential=locked_credential or credential,
                     staff_user=staff_user,
                     turf=locked_booking.turf,
                     check_in_time=now,
@@ -473,18 +481,18 @@ class QRService:
             locked_booking.checked_in_by = staff_user
             locked_booking.save()
 
-            if credential:
-                credential.status = "USED"
-                credential.checkin_at = now
-                credential.checkin_by = staff_user
-                credential.last_scanned_at = now
-                credential.scan_count += 1
-                credential.save()
+            if locked_credential:
+                locked_credential.status = "USED"
+                locked_credential.checkin_at = now
+                locked_credential.checkin_by = staff_user
+                locked_credential.last_scanned_at = now
+                locked_credential.scan_count += 1
+                locked_credential.save()
 
             # Record Successful CheckIn
             checkin_record = CheckIn.objects.create(
                 booking=locked_booking,
-                qr_credential=credential,
+                qr_credential=locked_credential or credential,
                 staff_user=staff_user,
                 turf=locked_booking.turf,
                 check_in_time=now,
@@ -551,25 +559,25 @@ class QRService:
     def get_pass_payload(cls, booking):
         """
         Returns full customer match pass payload.
+        Ensures active pass is visible for all confirmed bookings.
         """
         credential = getattr(booking, "qr_credential", None)
         if not credential or credential.status == "REVOKED":
             credential = cls.generate_credential_for_booking(booking)
 
         has_balance = float(booking.balance_due) > 0
-        qr_locked = has_balance
-        qr_image = None if qr_locked else (credential.qr_base64 if credential else None)
+        qr_image = credential.qr_base64 if credential else None
 
         return {
             "booking_id": booking.booking_id,
             "ticket_code": credential.credential_token if credential else "",
             "credential_version": credential.credential_version if credential else 1,
-            "status": "DEPOSIT_CONFIRMED" if qr_locked else (credential.status if credential else "ACTIVE"),
+            "status": "DEPOSIT_CONFIRMED" if has_balance else (credential.status if credential else "ACTIVE"),
             "booking_status": booking.status,
-            "qr_locked": qr_locked,
+            "qr_locked": False,
             "lock_reason": (
-                f"Deposit of ₹{float(booking.amount_paid):.0f} received. Remaining balance of ₹{float(booking.balance_due):.0f} must be settled to activate gate match pass."
-                if qr_locked
+                f"Deposit of ₹{float(booking.amount_paid):.0f} received. Remaining balance of ₹{float(booking.balance_due):.0f} is due at reception desk."
+                if has_balance
                 else None
             ),
             "payment_status": "PARTIAL" if has_balance else "PAID",

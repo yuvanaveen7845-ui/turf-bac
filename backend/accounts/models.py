@@ -88,6 +88,18 @@ class User(AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["first_name"]
 
+    def save(self, *args, **kwargs):
+        if not self.referral_code:
+            code = f"FT{uuid.uuid4().hex[:6].upper()}"
+            while User.objects.filter(referral_code=code).exists():
+                code = f"FT{uuid.uuid4().hex[:6].upper()}"
+            self.referral_code = code
+        super().save(*args, **kwargs)
+        if self.role == "CUSTOMER":
+            CustomerProfile.objects.get_or_create(user=self)
+        elif self.role in ("STAFF", "ADMIN"):
+            StaffProfile.objects.get_or_create(user=self)
+
     def __str__(self):
         return f"{self.email} ({self.role}) [{self.status}]"
 

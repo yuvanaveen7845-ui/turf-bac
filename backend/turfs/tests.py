@@ -73,3 +73,41 @@ class SchedulingEngineTests(TestCase):
         for s in maint_slots:
             self.assertFalse(s["is_available"])
 
+
+class TurfAPITests(TestCase):
+    def setUp(self):
+        self.admin_user = User.objects.create_superuser(
+            email="admin@friendsturf.local", password="adminpassword", role="ADMIN"
+        )
+        self.customer_user = User.objects.create_user(
+            email="cust@friendsturf.local", password="password123", role="CUSTOMER"
+        )
+        self.turf = Turf.objects.create(
+            name="Deletable Arena",
+            slug="deletable-arena",
+            sport_type="FOOTBALL",
+            description="Test arena",
+            location="Tiruppur",
+            address="Friends Turf",
+            base_price=Decimal("1000.00"),
+            operating_hours_start=time(6, 0),
+            operating_hours_end=time(23, 0),
+        )
+
+    def test_admin_can_delete_turf(self):
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(user=self.admin_user)
+        response = client.delete(f"/api/turfs/{self.turf.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Turf.objects.filter(id=self.turf.id).exists())
+
+    def test_customer_cannot_delete_turf(self):
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(user=self.customer_user)
+        response = client.delete(f"/api/turfs/{self.turf.id}/")
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Turf.objects.filter(id=self.turf.id).exists())
+
+

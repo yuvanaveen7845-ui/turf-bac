@@ -1,3 +1,5 @@
+import base64
+from email.mime.image import MIMEImage
 from datetime import timedelta
 import logging
 from django.utils import timezone
@@ -71,6 +73,7 @@ class EmailNotificationService:
         """
         Sends official match pass confirmation email with turnstile QR pass.
         If recipient_email is not provided, defaults to booking.customer.email.
+        Embeds QR pass as an inline MIME image (cid:match_pass_qr) for flawless display in Gmail/Outlook.
         """
         target_email = (recipient_email or getattr(booking.customer, "email", "") or "").strip()
         if not target_email:
@@ -90,7 +93,9 @@ class EmailNotificationService:
         try:
             match_date_str = booking.date.strftime("%d %b %Y")
             subject = f"Match Pass Confirmed: {booking.turf.name} (#{booking.booking_id}) — Friends Turf"
-            html_content = render_booking_confirmation_email(booking, qr_base64)
+            has_qr = bool(qr_base64)
+            qr_image_src = "cid:match_pass_qr" if has_qr else ""
+            html_content = render_booking_confirmation_email(booking, qr_image_src=qr_image_src)
             plain_text = (
                 f"Your match pass for {booking.turf.name} on {match_date_str} is confirmed.\n"
                 f"Booking ID: {booking.booking_id}\n"
@@ -110,6 +115,20 @@ class EmailNotificationService:
                 to=[target_email],
             )
             msg.attach_alternative(html_content, "text/html")
+            msg.mixed_subtype = "related"
+
+            # Attach the QR image as an inline MIME part within multipart/related
+            if has_qr:
+                try:
+                    raw_b64 = qr_base64.split(",")[-1]
+                    img_bytes = base64.b64decode(raw_b64)
+                    mime_img = MIMEImage(img_bytes, _subtype="png")
+                    mime_img.add_header("Content-ID", "<match_pass_qr>")
+                    mime_img.add_header("Content-Disposition", "inline", filename=f"match_pass_{booking.booking_id}.png")
+                    msg.attach(mime_img)
+                except Exception as img_err:
+                    logger.warning(f"Could not attach inline QR image to email: {img_err}")
+
             msg.send(fail_silently=False)
             logger.info(f"Successfully sent match pass email for {booking.booking_id} to {target_email}")
             return True

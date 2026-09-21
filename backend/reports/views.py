@@ -195,15 +195,16 @@ class ExportReportsCSVView(views.APIView):
         if report_type == "revenue":
             response["Content-Disposition"] = 'attachment; filename="friends_turf_revenue_report.csv"'
             writer = csv.writer(response)
-            writer.writerow(["Booking ID", "Customer", "Turf", "Date", "Time Slot", "Base Amount", "Discount", "Total Amount", "Paid Amount", "Balance Due", "Status"])
-            for b in Booking.objects.all().order_by("-date", "-created_at"):
+            writer.writerow(["Booking ID", "Customer", "Turf", "Date", "Time Slot", "Total Amount", "Discount", "Final Amount", "Paid Amount", "Balance Due", "Status"])
+            for b in Booking.objects.all().select_related("customer", "turf").order_by("-date", "-created_at"):
+                customer_str = b.customer.get_full_name() or getattr(b.customer, "phone", "") or b.customer.email if b.customer else "Guest Player"
                 writer.writerow([
                     b.booking_id,
-                    b.customer.get_full_name() or b.customer.phone or b.customer.email,
+                    customer_str,
                     b.turf.name if b.turf else "N/A",
                     b.date.strftime("%Y-%m-%d"),
                     f"{b.start_time.strftime('%H:%M')} - {b.end_time.strftime('%H:%M')}",
-                    float(b.base_amount),
+                    float(b.total_amount),
                     float(b.discount_amount),
                     float(b.final_amount),
                     float(b.amount_paid),
@@ -229,11 +230,13 @@ class ExportReportsCSVView(views.APIView):
             response["Content-Disposition"] = 'attachment; filename="friends_turf_bookings_log.csv"'
             writer = csv.writer(response)
             writer.writerow(["Booking ID", "Customer Name", "Customer Phone", "Turf Name", "Date", "Start Time", "End Time", "Final Amount", "Amount Paid", "Booking Status", "Booking Type", "Created At"])
-            for b in Booking.objects.all().order_by("-created_at"):
+            for b in Booking.objects.all().select_related("customer", "turf").order_by("-created_at"):
+                customer_name = b.customer.get_full_name() if b.customer else "Guest Player"
+                customer_phone = getattr(b.customer, "phone", "") or "N/A"
                 writer.writerow([
                     b.booking_id,
-                    b.customer.get_full_name() or "Guest Player",
-                    b.customer.phone or "N/A",
+                    customer_name or "Guest Player",
+                    customer_phone,
                     b.turf.name if b.turf else "N/A",
                     b.date.strftime("%Y-%m-%d"),
                     b.start_time.strftime("%H:%M"),
@@ -714,4 +717,440 @@ class SystemHealthView(views.APIView):
                 "active_turfs": Turf.objects.filter(is_active=True).count(),
             },
         })
+
+
+class OperationsControlCenterOverviewView(views.APIView):
+    """
+    Production-Grade Operations Control Center Command API:
+    Surfaces prioritized operational exceptions across 4 distinct tiers:
+    - 🔴 CRITICAL: Payment mismatches, Failed refunds, Failed jobs, Booking conflicts
+    - 🟠 ATTENTION: Expired holds, Pending/partial payments, Unresolved reconciliation items, Failed check-ins
+    - 🟡 UPCOMING: Scheduled pitch maintenance (and conflicts), Unresolved no-shows
+    - 🟢 TODAY / HEALTH: Revenue breakdown, Today's bookings, Pitch occupancy matrix, "Happening Now" strip
+    """
+    permission_classes = [IsStaffOrAdmin]
+
+    def get(self, request):
+        from payments.models import Payment, Refund, DailyCashDrawer
+        from payments.reconciliation import ReconciliationEngine
+        from qr_system.models import CheckIn
+        from maintenance.models import Maintenance
+        from audit.models import AuditLog
+
+        now = timezone.now()
+        local_now = timezone.localtime(now)
+        today = local_now.date()
+        now_time = local_now.time()
+
+        # -------------------------------------------------------------
+        # 1. 🔴 CRITICAL EXCEPTIONS
+        # -------------------------------------------------------------
+        # A. Payment Mismatches (From authoritative ReconciliationEngine)
+        anomalies = ReconciliationEngine.scan_anomalies()
+        payment_mismatches = [
+            {
+                "id": a["id"],
+                "type": a["type"],
+                "severity": a["severity"],
+                "title": a["title"],
+                "description": a["description"],
+                "booking_id": a.get("booking_id"),
+                "payment_id": a.get("payment_id"),
+                "customer_name": a.get("customer_name"),
+                "amount": a.get("amount", 0.0),
+                "detected_at": a.get("created_at"),
+                "recommended_action": a.get("recommended_action"),
+                "action_label": a.get("action_label"),
+            }
+            for a in anomalies
+            if a["type"] in ["UNCONFIRMED_PAID_BOOKING", "AMOUNT_MISMATCH"]
+        ]
+
+        # B. Failed Refunds
+        failed_refunds_qs = Refund.objects.filter(
+            status__in=["FAILED", "PENDING"]
+        ).select_related("payment", "booking", "booking__customer")
+        failed_refunds = [
+            {
+                "id": f"REF-ERR-{r.refund_id}",
+                "refund_id": r.refund_id,
+                "booking_id": r.booking.booking_id if r.booking else "N/A",
+                "customer_name": (r.booking.customer.get_full_name() or r.booking.customer.email) if r.booking and r.booking.customer else "N/A",
+                "customer_email": r.booking.customer.email if r.booking and r.booking.customer else "N/A",
+                "amount": float(r.amount),
+                "refund_to": r.refund_to,
+                "status": r.status,
+                "reason": r.reason or "Provider gateway timeout or decline",
+                "provider_refund_id": r.provider_refund_id or "N/A",
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in failed_refunds_qs
+        ]
+
+        # C. Failed Background Tasks / Audit Exceptions
+        failed_jobs_qs = AuditLog.objects.filter(
+            action__icontains="FAILED",
+            created_at__gte=now - timedelta(days=2),
+        ).select_related("user")[:15]
+        failed_jobs = [
+            {
+                "id": f"JOB-{j.id}",
+                "action": j.action,
+                "resource_type": j.resource_type,
+                "resource_id": j.resource_id,
+                "actor": j.user.email if j.user else "System Background Worker",
+                "details": j.details,
+                "timestamp": j.created_at.isoformat(),
+            }
+            for j in failed_jobs_qs
+        ]
+
+        # D. Booking / Slot Inconsistencies & Conflicts
+        # Check cancelled bookings that still hold BOOKED slots
+        stuck_cancelled = Booking.objects.filter(
+            status="CANCELLED", slots__status="BOOKED"
+        ).distinct()
+        booking_conflicts = [
+            {
+                "id": f"CONFLICT-CANCELLED-{b.booking_id}",
+                "booking_id": b.booking_id,
+                "turf_name": b.turf.name,
+                "date": str(b.date),
+                "time": f"{b.start_time.strftime('%H:%M')} - {b.end_time.strftime('%H:%M')}",
+                "conflict_type": "CANCELLED_HOLDING_SLOT",
+                "description": f"Cancelled booking {b.booking_id} has slots still marked BOOKED in schedule.",
+                "action_label": "Release Stuck Slots",
+            }
+            for b in stuck_cancelled
+        ]
+
+        # -------------------------------------------------------------
+        # 2. 🟠 ATTENTION REQUIRED
+        # -------------------------------------------------------------
+        # A. Expired Temporary Slot Holds
+        expired_holds_qs = TimeSlot.objects.filter(
+            status="LOCKED", locked_until__lt=now
+        ).select_related("turf", "locked_by")
+        expired_holds = [
+            {
+                "id": f"HOLD-{s.id}",
+                "slot_id": s.id,
+                "turf_id": s.turf_id,
+                "turf_name": s.turf.name,
+                "date": str(s.date),
+                "start_time": s.start_time.strftime("%H:%M"),
+                "end_time": s.end_time.strftime("%H:%M"),
+                "locked_by": s.locked_by.email if s.locked_by else "Anonymous / Guest",
+                "locked_until": s.locked_until.isoformat() if s.locked_until else "",
+                "price": float(s.price),
+                "status": "EXPIRED_LOCK",
+            }
+            for s in expired_holds_qs
+        ]
+
+        # B. Pending Partial Payments (Balance Due Today)
+        today_partial_qs = Booking.objects.filter(
+            date=today, balance_due__gt=Decimal("0.00"), status__in=["CONFIRMED", "PAYMENT_PENDING"]
+        ).select_related("turf", "customer")
+        pending_payments = [
+            {
+                "id": f"PENDING-BAL-{b.booking_id}",
+                "booking_id": b.booking_id,
+                "customer_name": b.customer.get_full_name() or b.customer.email,
+                "customer_phone": getattr(b.customer, "phone", "") or "N/A",
+                "turf_name": b.turf.name,
+                "match_time": f"{b.start_time.strftime('%H:%M')} - {b.end_time.strftime('%H:%M')}",
+                "final_amount": float(b.final_amount),
+                "amount_paid": float(b.amount_paid),
+                "balance_due": float(b.balance_due),
+                "status": b.status,
+            }
+            for b in today_partial_qs
+        ]
+
+        # C. Stale Pending Payments / Reconciliation
+        stale_pending = [
+            {
+                "id": a["id"],
+                "type": a["type"],
+                "severity": a["severity"],
+                "title": a["title"],
+                "description": a["description"],
+                "payment_id": a.get("payment_id"),
+                "booking_id": a.get("booking_id"),
+                "amount": a.get("amount", 0.0),
+                "detected_at": a.get("created_at"),
+            }
+            for a in anomalies
+            if a["type"] == "STALE_PENDING_PAYMENT"
+        ]
+
+        # D. Failed Turnstile QR / Gate Check-ins Today
+        denied_checkins_qs = CheckIn.objects.filter(
+            check_in_time__date=today, decision="DENY"
+        ).select_related("booking", "booking__customer", "staff_user", "turf").order_by("-check_in_time")[:15]
+        failed_checkins = [
+            {
+                "id": f"DENIED-{c.id}",
+                "booking_id": c.booking.booking_id if c.booking else (c.qr_credential.booking.booking_id if c.qr_credential and c.qr_credential.booking else "N/A"),
+                "customer_name": (c.booking.customer.get_full_name() or c.booking.customer.email) if c.booking and c.booking.customer else "Unknown Guest",
+                "turf_name": c.turf.name if c.turf else (c.booking.turf.name if c.booking and c.booking.turf else "Main Pitch"),
+                "reason_code": c.reason_code,
+                "message": c.message,
+                "check_in_time": c.check_in_time.strftime("%I:%M %p"),
+                "scanned_by": c.staff_user.get_full_name() if c.staff_user else "Turnstile Scanner",
+                "device": c.device_identifier,
+            }
+            for c in denied_checkins_qs
+        ]
+
+        # -------------------------------------------------------------
+        # 3. 🟡 UPCOMING OPERATIONAL NOTICES
+        # -------------------------------------------------------------
+        # A. Scheduled Pitch Maintenance
+        maintenances_qs = Maintenance.objects.filter(
+            date__gte=today
+        ).select_related("turf", "assigned_staff").order_by("date", "start_time")[:10]
+        maintenance_items = []
+        for m in maintenances_qs:
+            # Check if maintenance conflicts with any confirmed booking
+            conflicts = Booking.objects.filter(
+                turf=m.turf,
+                date=m.date,
+                status__in=["CONFIRMED", "UPCOMING", "PAYMENT_PENDING"],
+                start_time__lt=m.end_time,
+                end_time__gt=m.start_time,
+            ).count()
+            maintenance_items.append({
+                "id": f"MAINT-{m.id}",
+                "turf_name": m.turf.name if m.turf else "All Facility Pitches",
+                "date": str(m.date),
+                "start_time": m.start_time.strftime("%H:%M"),
+                "end_time": m.end_time.strftime("%H:%M"),
+                "reason": m.reason,
+                "status": m.status,
+                "conflicts_count": conflicts,
+                "created_by": m.assigned_staff.get_full_name() if m.assigned_staff else "Admin",
+            })
+
+        # B. No-shows (Past kickoff today without check-in)
+        no_show_qs = Booking.objects.filter(
+            date=today,
+            status__in=["CONFIRMED", "UPCOMING"],
+            end_time__lt=now_time,
+        ).select_related("turf", "customer")
+        no_shows = [
+            {
+                "id": f"NOSHOW-{b.booking_id}",
+                "booking_id": b.booking_id,
+                "customer_name": b.customer.get_full_name() or b.customer.email,
+                "customer_phone": getattr(b.customer, "phone", "") or "N/A",
+                "turf_name": b.turf.name,
+                "time": f"{b.start_time.strftime('%H:%M')} - {b.end_time.strftime('%H:%M')}",
+                "amount_paid": float(b.amount_paid),
+                "status": "ELAPSED_UNATTENDED",
+            }
+            for b in no_show_qs
+        ]
+
+        # -------------------------------------------------------------
+        # 4. 🟢 TODAY'S REVENUE, OCCUPANCY & HAPPENING NOW STRIP
+        # -------------------------------------------------------------
+        today_bookings = Booking.objects.filter(date=today).select_related("turf", "customer")
+        today_payments = Payment.objects.filter(created_at__date=today, status__in=["PAID", "SUCCESSFUL"])
+        today_refunds = Refund.objects.filter(created_at__date=today, status="COMPLETED")
+
+        gross_revenue = today_payments.aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
+        online_revenue = today_payments.filter(provider="RAZORPAY").aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
+        cash_revenue = today_payments.filter(provider="CASH").aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
+        wallet_revenue = today_payments.filter(provider="WALLET").aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
+        refunds_total = today_refunds.aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
+        net_revenue = gross_revenue - refunds_total
+        outstanding_balance = today_bookings.aggregate(Sum("balance_due"))["balance_due__sum"] or Decimal("0.00")
+
+        turfs = Turf.objects.filter(is_active=True)
+        total_slots_today = TimeSlot.objects.filter(date=today).count()
+        booked_slots_today = TimeSlot.objects.filter(date=today, status="BOOKED").count()
+        active_pitches_now = today_bookings.filter(start_time__lte=now_time, end_time__gte=now_time, status__in=["CONFIRMED", "CHECKED_IN"]).count()
+
+        # Happening Now ticker per turf
+        happening_now = []
+        for t in turfs:
+            current_booking = today_bookings.filter(
+                turf=t, start_time__lte=now_time, end_time__gte=now_time, status__in=["CONFIRMED", "CHECKED_IN"]
+            ).first()
+            next_booking = today_bookings.filter(
+                turf=t, start_time__gt=now_time, status__in=["CONFIRMED", "UPCOMING"]
+            ).order_by("start_time").first()
+
+            # Calculate remaining minutes in match
+            minutes_remaining = None
+            if current_booking:
+                match_end_dt = datetime.combine(today, current_booking.end_time)
+                diff = (match_end_dt - datetime.combine(today, now_time)).total_seconds()
+                minutes_remaining = max(0, int(diff / 60))
+
+            happening_now.append({
+                "turf_id": t.id,
+                "name": t.name,
+                "sport": t.sport_type,
+                "state": "IN_USE" if current_booking else "AVAILABLE",
+                "minutes_remaining": minutes_remaining,
+                "current_match": {
+                    "booking_id": current_booking.booking_id,
+                    "customer": current_booking.customer.get_full_name() or current_booking.customer.email,
+                    "time": f"{current_booking.start_time.strftime('%H:%M')} - {current_booking.end_time.strftime('%H:%M')}",
+                    "status": current_booking.status,
+                } if current_booking else None,
+                "next_match": {
+                    "booking_id": next_booking.booking_id,
+                    "customer": next_booking.customer.get_full_name() or next_booking.customer.email,
+                    "time": f"{next_booking.start_time.strftime('%H:%M')} - {next_booking.end_time.strftime('%H:%M')}",
+                    "starts_in_minutes": max(0, int((datetime.combine(today, next_booking.start_time) - datetime.combine(today, now_time)).total_seconds() / 60))
+                } if next_booking else None,
+            })
+
+        critical_count = len(payment_mismatches) + len(failed_refunds) + len(failed_jobs) + len(booking_conflicts)
+        attention_count = len(expired_holds) + len(pending_payments) + len(stale_pending) + len(failed_checkins)
+        upcoming_count = len(maintenance_items) + len(no_shows)
+
+        return Response({
+            "summary": {
+                "critical_count": critical_count,
+                "attention_count": attention_count,
+                "upcoming_count": upcoming_count,
+                "today_revenue_net": float(net_revenue),
+                "today_gross_revenue": float(gross_revenue),
+                "today_bookings_count": today_bookings.count(),
+                "occupancy_rate": round((booked_slots_today / total_slots_today * 100), 1) if total_slots_today > 0 else 0.0,
+                "active_pitches_now": active_pitches_now,
+                "total_pitches": turfs.count(),
+            },
+            "critical": {
+                "payment_mismatches": payment_mismatches,
+                "failed_refunds": failed_refunds,
+                "failed_jobs": failed_jobs,
+                "booking_conflicts": booking_conflicts,
+            },
+            "attention": {
+                "expired_holds": expired_holds,
+                "pending_payments": pending_payments,
+                "reconciliation_items": stale_pending,
+                "failed_checkins": failed_checkins,
+            },
+            "upcoming": {
+                "maintenance": maintenance_items,
+                "no_shows": no_shows,
+            },
+            "today": {
+                "financial_drawer": {
+                    "gross_revenue": float(gross_revenue),
+                    "online_revenue": float(online_revenue),
+                    "cash_revenue": float(cash_revenue),
+                    "wallet_revenue": float(wallet_revenue),
+                    "refunds_total": float(refunds_total),
+                    "net_revenue": float(net_revenue),
+                    "outstanding_balance": float(outstanding_balance),
+                },
+                "bookings": {
+                    "total": today_bookings.count(),
+                    "confirmed": today_bookings.filter(status="CONFIRMED").count(),
+                    "payment_pending": today_bookings.filter(status="PAYMENT_PENDING").count(),
+                    "completed": today_bookings.filter(status__in=["COMPLETED", "CHECKED_IN"]).count(),
+                    "cancelled": today_bookings.filter(status="CANCELLED").count(),
+                    "no_shows": today_bookings.filter(status="NO_SHOW").count(),
+                    "walk_ins": today_bookings.filter(booking_type="WALK_IN").count(),
+                },
+                "occupancy_stats": {
+                    "active_pitches_now": active_pitches_now,
+                    "total_pitches": turfs.count(),
+                    "slots_booked_today": booked_slots_today,
+                    "total_slots_today": total_slots_today,
+                    "occupancy_rate": round((booked_slots_today / total_slots_today * 100), 1) if total_slots_today > 0 else 0.0,
+                },
+                "happening_now": happening_now,
+            },
+            "meta": {
+                "generated_at": now.isoformat(),
+                "server_time": local_now.strftime("%I:%M:%S %p"),
+                "date_formatted": today.strftime("%A, %d %B %Y"),
+                "timezone": "Asia/Kolkata",
+            }
+        })
+
+
+class OperationsReleaseHoldView(views.APIView):
+    """
+    Safely releases expired temporary slot holds via BookingEngine.
+    """
+    permission_classes = [IsStaffOrAdmin]
+
+    def post(self, request):
+        from bookings.services import BookingEngine
+        from audit.models import AuditLog
+
+        slot_id = request.data.get("slot_id")
+        released_count = 0
+
+        if slot_id:
+            now = timezone.now()
+            slots = TimeSlot.objects.filter(pk=slot_id, status="LOCKED")
+            if slots.exists():
+                slots.update(status="AVAILABLE", locked_until=None, locked_by=None)
+                released_count = 1
+        else:
+            released_count = BookingEngine.release_expired_locks()
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="OPERATIONS_HOLD_RELEASED",
+            resource_type="SLOT",
+            resource_id=str(slot_id or "ALL_EXPIRED"),
+            details={"released_count": released_count, "staff": request.user.email},
+        )
+
+        return Response({
+            "success": True,
+            "message": f"Successfully released {released_count} expired slot hold(s).",
+            "released_count": released_count,
+        })
+
+
+class OperationsMarkNoShowView(views.APIView):
+    """
+    Marks an unfulfilled confirmed booking as NO_SHOW.
+    """
+    permission_classes = [IsStaffOrAdmin]
+
+    def post(self, request):
+        from audit.models import AuditLog
+
+        booking_id = request.data.get("booking_id")
+        if not booking_id:
+            return Response({"error": "booking_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        booking = Booking.objects.filter(booking_id=booking_id).first()
+        if not booking:
+            return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if booking.status in ["CHECKED_IN", "COMPLETED"]:
+            return Response({"error": f"Cannot mark a {booking.status} booking as NO_SHOW."}, status=status.HTTP_400_BAD_REQUEST)
+
+        booking.status = "NO_SHOW"
+        booking.save()
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="OPERATIONS_MARKED_NO_SHOW",
+            resource_type="BOOKING",
+            resource_id=booking.booking_id,
+            details={"staff": request.user.email},
+        )
+
+        return Response({
+            "success": True,
+            "message": f"Booking {booking.booking_id} marked as NO_SHOW.",
+            "booking_id": booking.booking_id,
+        })
+
 

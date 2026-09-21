@@ -8,6 +8,9 @@ from .views import (
     DailyOperationsView,
     DailyCloseSummaryView,
     SystemHealthView,
+    OperationsControlCenterOverviewView,
+    OperationsReleaseHoldView,
+    OperationsMarkNoShowView,
 )
 
 urlpatterns = [
@@ -19,5 +22,9 @@ urlpatterns = [
     path("daily-operations/", DailyOperationsView.as_view(), name="daily_operations"),
     path("daily-close/", DailyCloseSummaryView.as_view(), name="daily_close"),
     path("system-health/", SystemHealthView.as_view(), name="system_health"),
+    path("operations/overview/", OperationsControlCenterOverviewView.as_view(), name="operations_overview"),
+    path("operations/release-hold/", OperationsReleaseHoldView.as_view(), name="operations_release_hold"),
+    path("operations/mark-no-show/", OperationsMarkNoShowView.as_view(), name="operations_mark_no_show"),
 ]
+
 

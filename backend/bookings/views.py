@@ -1,8 +1,13 @@
+import uuid
+import re
+import logging
 from datetime import datetime, date
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 from .models import Booking
 from turfs.models import Turf, TimeSlot
@@ -363,34 +368,138 @@ class StaffWalkInBookingView(views.APIView):
     def post(self, request):
         turf_id = request.data.get("turf_id")
         slot_ids = request.data.get("slot_ids", [])
-        customer_name = request.data.get("customer_name", "Walk-in Guest")
-        customer_phone = request.data.get("customer_phone", "")
+        customer_name = (request.data.get("customer_name") or "Walk-in Guest").strip()
+        customer_phone = (request.data.get("customer_phone") or "").strip()
         notes = request.data.get("notes", "")
+        raw_payment_method = request.data.get("payment_method", "CASH").upper()
+        if raw_payment_method not in ["CASH", "UPI", "CARD", "WALLET", "NET_BANKING", "RAZORPAY"]:
+            payment_method = "CASH"
+        else:
+            payment_method = raw_payment_method
 
         turf = get_object_or_404(Turf, pk=turf_id)
-        today = timezone.now().date()
 
-        # Create temporary guest customer account if needed or assign to staff
-        email = f"walkin_{customer_phone or timezone.now().strftime('%H%M%S')}@friendsturf.local"
-        guest_user, _ = User.objects.get_or_create(
-            email=email,
-            defaults={
-                "first_name": customer_name,
-                "phone": customer_phone,
-                "role": "CUSTOMER",
-            },
-        )
+        # Resolve date: from parameter, or inferred from slot, or today
+        date_str = request.data.get("date")
+        if date_str:
+            try:
+                date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                date_obj = timezone.now().date()
+        elif slot_ids:
+            first_slot = TimeSlot.objects.filter(id__in=slot_ids).first()
+            date_obj = first_slot.date if first_slot else timezone.now().date()
+        else:
+            date_obj = timezone.now().date()
+
+        # Find or create customer account
+        guest_user = None
+        if customer_phone:
+            clean_phone = User.canonicalize_phone(customer_phone)
+            guest_user = User.objects.filter(phone=clean_phone).first() or User.objects.filter(phone=customer_phone).first()
+
+        if not guest_user:
+            slug = re.sub(r"[^\d]", "", customer_phone) if customer_phone else timezone.now().strftime("%Y%m%d%H%M%S")
+            email = f"walkin_{slug}_{uuid.uuid4().hex[:4]}@friendsturf.local"
+            guest_user = User.objects.create(
+                email=email,
+                first_name=customer_name or "Walk-in Guest",
+                phone=customer_phone,
+                role="CUSTOMER",
+            )
+        elif customer_name and guest_user.first_name in ("Walk-in Guest", ""):
+            guest_user.first_name = customer_name
+            guest_user.save()
+
+        # Walk-in via Razorpay: Create a PAYMENT_PENDING booking with server-calculated order
+        if payment_method == "RAZORPAY":
+            from payments.razorpay_client import RazorpayService
+            from payments.models import Payment
+
+            try:
+                booking = BookingEngine.create_booking(
+                    turf=turf,
+                    date_obj=date_obj,
+                    slot_ids=slot_ids,
+                    user=guest_user,
+                    booking_type="WALK_IN",
+                    payment_type="PENDING",
+                    payment_method="RAZORPAY",
+                    notes=f"Walk-in digital checkout initiated by staff {request.user.email}. {notes}".strip(),
+                    collected_by=request.user,
+                )
+
+                rzp_order = RazorpayService.create_order(
+                    amount_in_rupees=booking.final_amount,
+                    receipt_id=booking.booking_id,
+                    notes={
+                        "booking_id": booking.booking_id,
+                        "type": "WALK_IN_RAZORPAY",
+                        "customer_name": customer_name,
+                        "turf_name": turf.name,
+                    },
+                )
+
+                payment_id = Payment.generate_payment_id()
+                payment = Payment.objects.create(
+                    payment_id=payment_id,
+                    booking=booking,
+                    customer=guest_user,
+                    provider="RAZORPAY",
+                    provider_order_id=rzp_order["order_id"],
+                    amount=booking.final_amount,
+                    currency="INR",
+                    payment_method="UPI",
+                    payment_type="FULL",
+                    transaction_reference=f"TXN-{booking.booking_id}-{uuid.uuid4().hex[:6].upper()}",
+                    status="PENDING",
+                    collected_by=request.user,
+                    notes="Walk-in desk Razorpay intent",
+                )
+
+                return Response(
+                    {
+                        "booking": BookingSerializer(booking).data,
+                        "booking_id": booking.booking_id,
+                        "order_id": rzp_order["order_id"],
+                        "amount": rzp_order["amount"],
+                        "currency": rzp_order["currency"],
+                        "key_id": rzp_order["key_id"],
+                        "amount_to_pay": float(booking.final_amount),
+                        "payment_id": payment.payment_id,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+            except ValueError as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                logger.exception("Walk-in Razorpay error")
+                return Response(
+                    {
+                        "error": "Payment gateway initialization failed for walk-in booking.",
+                        "code": "PAYMENT_PROVIDER_UNAVAILABLE",
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+        # Walk-in via Offline (Cash / Counter UPI / Card / Wallet)
+        payment_type = request.data.get("payment_type", "FULL")
+        if payment_type not in ["FULL", "PARTIAL", "PENDING", "ON_ARRIVAL"]:
+            payment_type = "FULL"
+        if payment_type == "ON_ARRIVAL":
+            payment_type = "PENDING"
 
         try:
             booking = BookingEngine.create_booking(
                 turf=turf,
-                date_obj=today,
+                date_obj=date_obj,
                 slot_ids=slot_ids,
                 user=guest_user,
                 booking_type="WALK_IN",
-                payment_type="FULL",
-                payment_method="CASH",
-                notes=f"Walk-in booked by staff {request.user.email}. {notes}",
+                payment_type=payment_type,
+                payment_method=payment_method,
+                notes=f"Walk-in booked by staff {request.user.email}. {notes}".strip(),
+                collected_by=request.user,
             )
             # Broadcast walk-in confirmed
             publish_event(
@@ -420,6 +529,12 @@ class StaffWalkInBookingView(views.APIView):
             )
         except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.exception("Walk-in booking error")
+            return Response(
+                {"error": f"Failed to complete walk-in booking: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
 
 class RecordOfflinePaymentView(views.APIView):

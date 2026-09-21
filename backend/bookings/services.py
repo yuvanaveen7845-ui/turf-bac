@@ -161,6 +161,7 @@ class BookingEngine:
         payment_method="UPI",
         notes="",
         participants=None,
+        collected_by=None,
     ):
         """
         Authoritative booking creation pipeline:
@@ -277,6 +278,24 @@ class BookingEngine:
 
             # Generate QR Ticket
             QRService.generate_qr_for_booking(booking)
+
+            # Record Authoritative Initial Payment if money was collected (Cash, Spot UPI, Card, Wallet)
+            if amt_paid > Decimal("0.00"):
+                provider = "CASH" if payment_method == "CASH" else ("WALLET" if payment_method == "WALLET" else "RAZORPAY")
+                Payment.objects.create(
+                    payment_id=f"PAY_{uuid.uuid4().hex[:12].upper()}",
+                    booking=booking,
+                    customer=user,
+                    provider=provider,
+                    amount=amt_paid,
+                    currency="INR",
+                    payment_method=payment_method,
+                    payment_type=payment_type,
+                    transaction_reference=f"TXN-{booking.booking_id}-{uuid.uuid4().hex[:6].upper()}",
+                    status="PAID",
+                    collected_by=collected_by if (collected_by and getattr(collected_by, "is_authenticated", False)) else None,
+                    gateway_response={"source": "booking_engine_initial", "notes": notes},
+                )
 
             # Update customer profile stats
             if hasattr(user, "customer_profile") and amt_paid > 0:

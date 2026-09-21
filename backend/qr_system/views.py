@@ -1,6 +1,8 @@
+import base64
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
+from django.http import HttpResponse
 from django.utils import timezone
 from django.db.models import Count, Q
 
@@ -46,14 +48,23 @@ class QRCollectBalanceAndAdmitView(views.APIView):
         else:
             booking = get_object_or_404(Booking.objects.select_for_update(), booking_id=booking_id)
 
-        balance_to_collect = booking.balance_due
         if amount_input:
             try:
                 balance_to_collect = Decimal(str(amount_input))
             except Exception:
                 balance_to_collect = booking.balance_due
+        else:
+            balance_to_collect = booking.balance_due
 
         if balance_to_collect > Decimal("0.00"):
+            if balance_to_collect > booking.balance_due:
+                return Response(
+                    {
+                        "error": f"Collection amount ₹{balance_to_collect} exceeds remaining balance due ₹{booking.balance_due}."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             payment_id = Payment.generate_payment_id()
             txn_ref = f"GATE-{uuid.uuid4().hex[:10].upper()}"
 
@@ -75,7 +86,7 @@ class QRCollectBalanceAndAdmitView(views.APIView):
                 gateway_response={"collected_by": request.user.email, "notes": notes, "collected_at_gate": True},
             )
 
-            booking.amount_paid += balance_to_collect
+            booking.amount_paid = min(booking.final_amount, booking.amount_paid + balance_to_collect)
             booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
             if booking.status in ["PAYMENT_PENDING", "PENDING"]:
                 booking.status = "CONFIRMED"
@@ -434,3 +445,29 @@ class AdminRegeneratePassView(views.APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class QRImageServeView(views.APIView):
+    """
+    Public raw PNG image endpoint for match pass QR codes.
+    Allows image embedding in external viewers, web pages, and print stylesheets.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, booking_id):
+        booking = get_object_or_404(Booking, booking_id=booking_id)
+        credential = getattr(booking, "qr_credential", None)
+        if not credential or not credential.qr_base64:
+            credential = QRService.generate_credential_for_booking(booking)
+
+        if not credential or not credential.qr_base64:
+            return HttpResponse(status=404)
+
+        try:
+            raw_b64 = credential.qr_base64.split(",")[-1]
+            img_bytes = base64.b64decode(raw_b64)
+            response = HttpResponse(img_bytes, content_type="image/png")
+            response["Cache-Control"] = "public, max-age=86400"
+            return response
+        except Exception:
+            return HttpResponse(status=500)

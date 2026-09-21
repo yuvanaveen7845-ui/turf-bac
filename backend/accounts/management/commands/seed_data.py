@@ -6,14 +6,16 @@ from decimal import Decimal
 from accounts.models import User, CustomerProfile, StaffProfile
 from turfs.models import Facility, Turf, TimeSlot
 from turfs.services import SchedulingEngine
-from promotions.models import Coupon
+from pricing.models import PricingRule, Holiday
+from promotions.models import Coupon, ReferralReward
 from memberships.models import MembershipPlan, CustomerMembership
 from bookings.models import Booking
 from bookings.services import BookingEngine
 from payments.models import Payment
 from qr_system.services import QRService
+from reviews.models import Review
 from notifications.models import Notification
-from wallet.models import WalletTransaction
+from wallet.models import WalletTransaction, LoyaltyTransaction
 
 
 class Command(BaseCommand):
@@ -22,9 +24,17 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         self.stdout.write(self.style.NOTICE("Seeding Friends Turf database..."))
 
+        from accounts.models import User, CustomerProfile, StaffProfile
+        from turfs.models import Facility, Turf, TimeSlot
         from pricing.models import PricingRule, Holiday
         from promotions.models import Coupon, ReferralReward
         from memberships.models import MembershipPlan, CustomerMembership
+        from bookings.models import Booking
+        from payments.models import Payment
+        from reviews.models import Review
+        from notifications.models import Notification
+        from wallet.models import WalletTransaction, LoyaltyTransaction
+
 
 
         # 1. Facilities

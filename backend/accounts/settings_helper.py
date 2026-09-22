@@ -63,6 +63,9 @@ DEFAULT_BUSINESS_SETTINGS = {
         "reminder2h": True,
         "postMatchFeedbackHours": 2,
     },
+    "auth": {
+        "google_client_id": "",
+    },
 }
 
 
@@ -72,18 +75,47 @@ class BusinessSettingsHelper:
     with robust fallback defaults.
     """
 
+    CACHE_TTL = 300  # 5 minutes
+
     @classmethod
     def get_section(cls, section_name: str) -> Dict[str, Any]:
+        from django.core.cache import cache
+
+        cache_key = f"biz_settings_{section_name}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         from .models import BusinessSetting
 
         defaults = DEFAULT_BUSINESS_SETTINGS.get(section_name, {})
+        result = dict(defaults)
         try:
             record = BusinessSetting.objects.filter(key=section_name).first()
             if record and isinstance(record.value, dict):
-                return {**defaults, **record.value}
+                result = {**result, **record.value}
         except Exception:
             pass
-        return defaults
+
+        # Fallback dynamic retrieval for auth section (reads env/settings if not set in DB)
+        if section_name == "auth" and not result.get("google_client_id"):
+            from django.conf import settings
+            import os
+            result["google_client_id"] = getattr(settings, "GOOGLE_CLIENT_ID", "") or os.getenv("GOOGLE_CLIENT_ID", "")
+
+        cache.set(cache_key, result, timeout=cls.CACHE_TTL)
+        return result
+
+    @classmethod
+    def invalidate_cache(cls, section_name: str = None):
+        """Call after admin updates BusinessSetting to bust the cache."""
+        from django.core.cache import cache
+
+        if section_name:
+            cache.delete(f"biz_settings_{section_name}")
+        else:
+            for key in DEFAULT_BUSINESS_SETTINGS:
+                cache.delete(f"biz_settings_{key}")
 
     @classmethod
     def get_company_settings(cls) -> Dict[str, Any]:

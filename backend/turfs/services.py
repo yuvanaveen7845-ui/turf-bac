@@ -154,9 +154,12 @@ class SchedulingEngine:
         if pricing_context is None:
             pricing_context = PricingEngine.get_pricing_context(turf, date_obj)
 
+        # Compute timezone once for entire batch — avoids 4× per slot overhead
+        now_local = timezone.localtime(timezone.now())
+        now_context = (now_local.date(), now_local.time())
+
         serialized_slots = []
         slots_to_update = []
-        now_dt = timezone.now()
 
         for slot in slots:
             # Sync maintenance status
@@ -176,7 +179,7 @@ class SchedulingEngine:
                 turf, date_obj, slot.start_time, slot.end_time, pricing_context=pricing_context
             )
 
-            slot_data = TimeSlotSerializer(slot).data
+            slot_data = TimeSlotSerializer(slot, context={"now_context": now_context}).data
             slot_data["price"] = price_info["slot_price"]
             slot_data["base_price"] = price_info["base_price"]
             slot_data["applied_rules"] = price_info["applied_rules"]

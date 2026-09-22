@@ -78,7 +78,7 @@ class TurfListView(views.APIView):
         return [IsAdmin()]
 
     def get(self, request):
-        turfs = Turf.objects.all()
+        turfs = Turf.objects.prefetch_related("facilities").all()
         sport = request.query_params.get("sport_type")
         if sport:
             turfs = turfs.filter(sport_type=sport.upper())
@@ -177,9 +177,12 @@ class DailyScheduleView(views.APIView):
                 )
 
         sport = request.query_params.get("sport_type")
-        turfs_qs = Turf.objects.filter(is_active=True)
+        turfs_qs = Turf.objects.filter(is_active=True).prefetch_related("facilities")
         if sport and sport.upper() != "ALL":
             turfs_qs = turfs_qs.filter(sport_type=sport.upper())
+
+        # Batch: clean up ALL expired locks in one query instead of per-turf
+        SchedulingEngine.cleanup_expired_locks(date_obj=date_obj)
 
         turfs_data = []
         pricing_context = PricingEngine.get_pricing_context(date_obj=date_obj)

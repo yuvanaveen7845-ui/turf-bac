@@ -119,6 +119,17 @@ else:
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 SILENCED_SYSTEM_CHECKS = []
 
+# In-process cache for BusinessSettings, pricing contexts, and other hot-path data.
+# LocMemCache requires no external infrastructure (Redis, Memcached) — ideal for
+# single-dyno Render deployments. Each gunicorn worker gets its own cache instance.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "friends-turf-cache",
+        "TIMEOUT": 300,  # 5 minutes default TTL
+    }
+}
+
 AUTH_USER_MODEL = "accounts.User"
 
 
@@ -150,18 +161,24 @@ SIMPLE_JWT = {
 # Proxy SSL Header for Render, Heroku, Cloudflare, AWS load balancers
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+DEFAULT_CORS_ALLOWED_ORIGINS = [
+    "https://friendsturf.in",
+    "https://www.friendsturf.in",
+    "https://friendsturf.com",
+    "https://www.friendsturf.com",
+    "https://turf-fron.pages.dev",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+
 cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
 if cors_origins_env:
-    CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+    env_origins = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+    CORS_ALLOWED_ORIGINS = list(dict.fromkeys(DEFAULT_CORS_ALLOWED_ORIGINS + env_origins))
 else:
-    CORS_ALLOWED_ORIGINS = [
-        "https://turf-fron.pages.dev",
-        "https://friendsturf.com",
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-    ]
+    CORS_ALLOWED_ORIGINS = DEFAULT_CORS_ALLOWED_ORIGINS
 
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOW_CREDENTIALS = True
@@ -169,23 +186,32 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.onrender\.com$",
     r"^https:\/\/.*\.vercel\.app$",
     r"^https:\/\/.*\.pages\.dev$",
+    r"^https:\/\/.*\.friendsturf\.in$",
+    r"^https:\/\/.*\.friendsturf\.com$",
 ]
 
 # CSRF Trusted Origins for HTTPS requests in production
+DEFAULT_CSRF_TRUSTED_ORIGINS = [
+    "https://*.onrender.com",
+    "https://*.vercel.app",
+    "https://*.pages.dev",
+    "https://turf-fron.pages.dev",
+    "https://friendsturf.in",
+    "https://*.friendsturf.in",
+    "https://friendsturf.com",
+    "https://*.friendsturf.com",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+
 csrf_origins_env = os.getenv("CSRF_TRUSTED_ORIGINS", "").strip()
 if csrf_origins_env:
-    CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins_env.split(",") if origin.strip()]
+    env_csrf = [origin.strip() for origin in csrf_origins_env.split(",") if origin.strip()]
+    CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_TRUSTED_ORIGINS + env_csrf))
 else:
-    CSRF_TRUSTED_ORIGINS = [
-        "https://*.onrender.com",
-        "https://*.vercel.app",
-        "https://*.pages.dev",
-        "https://turf-fron.pages.dev",
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:5174",
-    ]
+    CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_TRUSTED_ORIGINS
 
 # Production Security Configurations
 SECURE_CROSS_ORIGIN_OPENER_POLICY = os.getenv("SECURE_CROSS_ORIGIN_OPENER_POLICY", "same-origin-allow-popups")

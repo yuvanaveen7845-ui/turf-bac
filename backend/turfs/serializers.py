@@ -79,8 +79,19 @@ class TimeSlotSerializer(serializers.ModelSerializer):
         ]
 
     def _get_time_context(self):
-        now = timezone.localtime(timezone.now())
-        return now.date(), now.time()
+        """
+        Returns (current_date, current_time) — computed once per serialization batch.
+        Callers pass 'now_context' via serializer context to avoid repeated
+        timezone.localtime() calls (was 4× per slot × 68 slots = 272 calls).
+        """
+        ctx = self.context.get("now_context")
+        if ctx:
+            return ctx
+        # Fallback: compute once and cache on instance for this batch
+        if not hasattr(self, "_cached_time_context"):
+            now = timezone.localtime(timezone.now())
+            self._cached_time_context = (now.date(), now.time())
+        return self._cached_time_context
 
     def get_is_past(self, obj):
         current_date, current_time = self._get_time_context()

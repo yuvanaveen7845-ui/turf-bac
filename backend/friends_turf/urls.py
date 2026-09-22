@@ -19,6 +19,23 @@ def api_root(request):
         }
     })
 
+
+def health_check(request):
+    """
+    Lightweight health endpoint for keep-alive pings (e.g. UptimeRobot).
+    Does a minimal DB query to keep the connection pool warm and prevent
+    Render cold starts from killing perceived performance.
+    """
+    from django.db import connection
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        db_ok = True
+    except Exception:
+        db_ok = False
+    status_code = 200 if db_ok else 503
+    return JsonResponse({"status": "ok" if db_ok else "degraded", "db": db_ok}, status=status_code)
+
 # Shared API route patterns available under both /api/... and root /...
 api_patterns = [
     path("auth/", include("accounts.urls")),
@@ -42,6 +59,7 @@ api_patterns = [
 urlpatterns = [
     path("", api_root, name="api_root"),
     path("admin/", admin.site.urls),
+    path("api/health/", health_check, name="health_check"),
     
     # API endpoints under both /api/... and direct /...
     path("api/", include(api_patterns)),

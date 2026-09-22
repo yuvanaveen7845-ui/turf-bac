@@ -83,7 +83,9 @@ class GoogleAuthView(views.APIView):
 
             # 1. Verify Google ID Token
             id_info = None
-            client_id = getattr(settings, "GOOGLE_CLIENT_ID", "") or None
+            from .settings_helper import BusinessSettingsHelper
+            auth_config = BusinessSettingsHelper.get_section("auth")
+            client_id = (auth_config.get("google_client_id") or "").strip() or getattr(settings, "GOOGLE_CLIENT_ID", "") or None
 
             # Primary: Verify ID token using google-auth library
             try:
@@ -862,15 +864,10 @@ class BusinessSettingsView(views.APIView):
 
     def get(self, request):
         from .models import BusinessSetting
-        from .settings_helper import DEFAULT_BUSINESS_SETTINGS
+        from .settings_helper import BusinessSettingsHelper, DEFAULT_BUSINESS_SETTINGS
         settings_dict = {}
-        for section, defaults in DEFAULT_BUSINESS_SETTINGS.items():
-            record = BusinessSetting.objects.filter(key=section).first()
-            if record and isinstance(record.value, dict):
-                merged = {**defaults, **record.value}
-                settings_dict[section] = merged
-            else:
-                settings_dict[section] = defaults
+        for section in DEFAULT_BUSINESS_SETTINGS.keys():
+            settings_dict[section] = BusinessSettingsHelper.get_section(section)
         # Include feature flags in response
         features_record = BusinessSetting.objects.filter(key="features").first()
         settings_dict["features"] = (
@@ -883,6 +880,7 @@ class BusinessSettingsView(views.APIView):
             return Response({"error": "Admin permission required."}, status=status.HTTP_403_FORBIDDEN)
 
         from .models import BusinessSetting
+        from .settings_helper import BusinessSettingsHelper
         data = request.data
         updated_sections = []
 
@@ -893,6 +891,9 @@ class BusinessSettingsView(views.APIView):
                 record.updated_by = request.user
                 record.save()
                 updated_sections.append(section)
+
+        # Invalidate cached settings
+        BusinessSettingsHelper.invalidate_cache()
 
         AuditLog.objects.create(
             user=request.user,

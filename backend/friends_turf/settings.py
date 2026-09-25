@@ -85,9 +85,12 @@ if DATABASE_URL:
     import dj_database_url
 
     is_pooler = "pooler.supabase.com" in DATABASE_URL or ":6543" in DATABASE_URL
+    # Reuse connections across requests (default 300s / 5 mins) to eliminate
+    # TLS/SSL and TCP handshake overhead on every single HTTP request.
+    conn_max_age = int(os.environ.get("DB_CONN_MAX_AGE", "300"))
     db_config = dj_database_url.config(
         default=DATABASE_URL,
-        conn_max_age=0 if is_pooler else 600,
+        conn_max_age=conn_max_age,
         conn_health_checks=True,
         ssl_require=os.environ.get("DB_SSL_REQUIRE", "true").lower() in ("true", "1", "yes"),
     )

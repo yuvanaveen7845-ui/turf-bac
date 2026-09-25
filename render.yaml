@@ -2,6 +2,7 @@ services:
   - type: web
     name: turf-bac
     runtime: python
+    region: singapore
     rootDir: backend
     buildCommand: "pip install -r requirements.txt && python manage.py migrate && python manage.py seed_data"
     startCommand: "gunicorn friends_turf.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --threads 4 --worker-class gthread --worker-tmp-dir /dev/shm --timeout 90"
@@ -15,8 +16,10 @@ services:
       - key: ALLOWED_HOSTS
         value: "*"
       - key: DATABASE_URL
-        value: "postgresql://postgres.tsqskggpbikhgypablih:Friendsturf%4012345@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres"
+        value: "postgresql://postgres.tsqskggpbikhgypablih:Friendsturf%4012345@aws-0-ap-northeast-2.pooler.supabase.com:6543/postgres"
       - key: DB_SSL_REQUIRE
         value: "true"
+      - key: DB_CONN_MAX_AGE
+        value: "300"
 
 

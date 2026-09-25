@@ -88,6 +88,8 @@ class RefundSerializer(serializers.ModelSerializer):
     booking_reference = serializers.ReadOnlyField(source="booking.booking_id")
     customer_email = serializers.ReadOnlyField(source="booking.customer.email")
     customer_name = serializers.SerializerMethodField()
+    customer_phone = serializers.ReadOnlyField(source="booking.customer.phone")
+    turf_name = serializers.ReadOnlyField(source="booking.turf.name")
     initiated_by_email = serializers.ReadOnlyField(source="initiated_by.email")
 
     class Meta:
@@ -98,7 +100,9 @@ class RefundSerializer(serializers.ModelSerializer):
             "payment",
             "booking",
             "booking_reference",
+            "turf_name",
             "customer_email",
+            "customer_phone",
             "customer_name",
             "provider_refund_id",
             "amount",

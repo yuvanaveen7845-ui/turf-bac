@@ -89,6 +89,11 @@ class Payment(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["created_at", "status"], name="payment_created_stat_idx"),
+            models.Index(fields=["booking", "status"], name="payment_bk_stat_idx"),
+            models.Index(fields=["customer", "status"], name="payment_cust_stat_idx"),
+        ]
 
     def __str__(self):
         return f"{self.payment_id} | {self.booking.booking_id} | ₹{self.amount} [{self.status}]"

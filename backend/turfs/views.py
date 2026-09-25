@@ -181,33 +181,13 @@ class DailyScheduleView(views.APIView):
         if sport and sport.upper() != "ALL":
             turfs_qs = turfs_qs.filter(sport_type=sport.upper())
 
-        # Batch: clean up ALL expired locks in one query instead of per-turf
-        SchedulingEngine.cleanup_expired_locks(date_obj=date_obj)
-
-        turfs_data = []
         pricing_context = PricingEngine.get_pricing_context(date_obj=date_obj)
-        for turf in turfs_qs:
-            avail = SchedulingEngine.get_turf_availability(
-                turf=turf, date_obj=date_obj, user=request.user, pricing_context=pricing_context
-            )
-            turfs_data.append(
-                {
-                    "id": str(turf.id),
-                    "name": turf.name,
-                    "slug": turf.slug,
-                    "sport_type": turf.sport_type,
-                    "base_price": float(turf.base_price),
-                    "capacity": turf.capacity,
-                    "dimensions": turf.dimensions,
-                    "surface_spec": turf.surface_spec,
-                    "lighting_spec": turf.lighting_spec,
-                    "is_fifa_certified": turf.is_fifa_certified,
-                    "images": turf.images,
-                    "available_slots_count": avail["available_slots_count"],
-                    "is_fast_fill": avail["is_fast_fill"],
-                    "slots": avail["slots"],
-                }
-            )
+        turfs_data = SchedulingEngine.get_daily_schedule_batch(
+            turfs=turfs_qs,
+            date_obj=date_obj,
+            user=request.user,
+            pricing_context=pricing_context,
+        )
 
         return Response(
             {

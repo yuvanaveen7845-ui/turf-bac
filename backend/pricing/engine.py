@@ -19,7 +19,18 @@ class PricingEngine:
         """
         Pre-fetches all pricing rules, holidays, and special events in a single batch.
         Eliminates repeated database roundtrips when calculating slot pricing matrices.
+        Caches in LocMemCache for 60 seconds to provide near-instant retrieval.
         """
+        from django.core.cache import cache
+
+        turf_key = str(turf.id) if turf else "all"
+        date_key = str(date_obj) if date_obj else "nodate"
+        cache_key = f"pricing_ctx_{turf_key}_{date_key}"
+
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         rules = list(PricingRule.objects.filter(is_active=True).order_by("-priority"))
         holiday = None
         special_event = None
@@ -31,11 +42,13 @@ class PricingEngine:
             else:
                 special_event = se_qs.first()
 
-        return {
+        context_data = {
             "rules": rules,
             "holiday": holiday,
             "special_event": special_event,
         }
+        cache.set(cache_key, context_data, timeout=60)
+        return context_data
 
     @classmethod
     def calculate_slot_price(cls, turf, date_obj, start_time_obj, end_time_obj, pricing_context=None):
@@ -49,6 +62,16 @@ class PricingEngine:
         Supports optional pre-fetched pricing_context to avoid N+1 DB queries.
         """
         base_price = Decimal(str(turf.base_price))
+
+        # Check feature flag for dynamic surge pricing
+        if not BusinessSettingsHelper.is_feature_enabled("DYNAMIC_PRICING", default=True):
+            min_slot_price = Decimal(str(BusinessSettingsHelper.get_payment_settings().get("minSlotPrice", 1.0)))
+            return {
+                "base_price": float(base_price),
+                "applied_rules": [],
+                "slot_price": float(max(min_slot_price, base_price)),
+            }
+
         current_price = base_price
         applied_rules = []
 
@@ -92,7 +115,8 @@ class PricingEngine:
                 }
             )
 
-        # 3. Dynamic Pricing Rules
+        # 3. Dynamic Pricing Rules (Ordered by -priority)
+        applied_rule_priorities = []
         for rule in rules:
             # Check turf applicability
             if rule.turf_id and rule.turf_id != turf.id:
@@ -115,6 +139,11 @@ class PricingEngine:
                 ):
                     continue
 
+            # Priority Resolution: If a rule with strictly higher priority has already
+            # applied for this slot, lower-priority overlapping rules are overridden.
+            if any(prev_priority > rule.priority for prev_priority in applied_rule_priorities):
+                continue
+
             # Rule applies! Calculate adjustment
             adj_val = Decimal(str(rule.adjustment_value))
             if rule.adjustment_type == "PERCENTAGE":
@@ -123,6 +152,7 @@ class PricingEngine:
                 adjustment = adj_val
 
             current_price += adjustment
+            applied_rule_priorities.append(rule.priority)
             applied_rules.append(
                 {"name": rule.name, "type": rule.rule_type, "amount": float(adjustment)}
             )
@@ -307,7 +337,7 @@ class PricingEngine:
             "total_discount": float(total_discount),
             "discount_sources": discount_sources,
             "taxable_amount": float(taxable_amount),
-            "tax_rate_percent": float(cls.TAX_RATE_PERCENTAGE),
+            "tax_rate_percent": float(tax_rate),
             "tax_amount": float(tax_amount),
             "final_amount": float(final_amount),
             "original_standard_total": original_standard_total,

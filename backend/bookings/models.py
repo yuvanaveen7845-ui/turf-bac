@@ -73,9 +73,51 @@ class Booking(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["customer", "date", "status"], name="booking_cust_date_idx"),
+            models.Index(fields=["date", "start_time"], name="booking_date_time_idx"),
+            models.Index(fields=["turf", "date"], name="booking_turf_date_idx"),
+            models.Index(fields=["status", "date"], name="booking_stat_date_idx"),
+        ]
 
     def __str__(self):
         return f"{self.booking_id} | {self.turf.name} | {self.date} [{self.status}]"
+
+    # ── Booking Status State Machine ────────────────────────────────────
+    # Defines every legal status transition. Any transition not listed here
+    # is rejected, preventing invalid state corruption across all codepaths.
+    VALID_TRANSITIONS = {
+        "UPCOMING":         {"CONFIRMED", "CANCELLED", "PAYMENT_PENDING"},
+        "PAYMENT_PENDING":  {"CONFIRMED", "CANCELLED"},
+        "CONFIRMED":        {"CHECKED_IN", "CANCELLED", "NO_SHOW"},
+        "CHECKED_IN":       {"IN_PROGRESS", "COMPLETED"},
+        "IN_PROGRESS":      {"COMPLETED"},
+        "COMPLETED":        {"REFUNDED"},
+        "CANCELLED":        {"REFUNDED"},
+        "NO_SHOW":          set(),  # Terminal state
+        "REFUNDED":         set(),  # Terminal state
+    }
+
+    def can_transition_to(self, new_status: str) -> bool:
+        """Check if transitioning to new_status is allowed from current status."""
+        allowed = self.VALID_TRANSITIONS.get(self.status, set())
+        return new_status in allowed
+
+    def transition_to(self, new_status: str):
+        """
+        Transition booking to a new status, enforcing the state machine.
+        Raises ValueError if the transition is not allowed.
+        Does NOT call save() — caller is responsible for saving.
+        """
+        if new_status == self.status:
+            return  # No-op for idempotent calls
+        allowed = self.VALID_TRANSITIONS.get(self.status, set())
+        if new_status not in allowed:
+            raise ValueError(
+                f"Invalid booking status transition: {self.status} → {new_status}. "
+                f"Allowed transitions from {self.status}: {sorted(allowed) if allowed else 'none (terminal state)'}."
+            )
+        self.status = new_status
 
     @classmethod
     def generate_booking_id(cls, date_obj=None):

@@ -37,6 +37,18 @@ class QRCollectBalanceAndAdmitView(views.APIView):
         notes = request.data.get("notes", "Gate / Reception Desk Balance Settlement").strip()
         facility_id = request.data.get("facility_id")
 
+        from accounts.settings_helper import BusinessSettingsHelper
+        if not BusinessSettingsHelper.is_feature_enabled("QR_CHECKIN"):
+            return Response(
+                {"error": "Gate admission & QR check-in is currently disabled by administrator."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if payment_method == "CASH" and not BusinessSettingsHelper.is_feature_enabled("OFFLINE_PAYMENTS"):
+            return Response(
+                {"error": "Cash collection is currently disabled by administration."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if not booking_id:
             return Response(
                 {"error": "Booking ID is required."},
@@ -88,8 +100,8 @@ class QRCollectBalanceAndAdmitView(views.APIView):
 
             booking.amount_paid = min(booking.final_amount, booking.amount_paid + balance_to_collect)
             booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
-            if booking.status in ["PAYMENT_PENDING", "PENDING"]:
-                booking.status = "CONFIRMED"
+            if booking.can_transition_to("CONFIRMED"):
+                booking.transition_to("CONFIRMED")
             booking.save()
 
             # Ensure QR credential is valid and active
@@ -162,6 +174,18 @@ class QRValidateScanView(views.APIView):
         method = request.data.get("method", "QR_SCAN")
         facility_id = request.data.get("facility_id", None)
         device_id = request.data.get("device_identifier", "")
+
+        from accounts.settings_helper import BusinessSettingsHelper
+        if not BusinessSettingsHelper.is_feature_enabled("QR_CHECKIN"):
+            return Response(
+                {
+                    "valid": False,
+                    "decision": "DENY",
+                    "error": "QR Match Pass check-in is currently disabled by administrator.",
+                    "message": "QR Check-in scanner disabled.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if not raw_token:
             return Response(

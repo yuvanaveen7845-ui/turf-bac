@@ -42,6 +42,13 @@ class ValidateCouponView(views.APIView):
         code = request.data.get("code", "").strip().upper()
         amount = Decimal(str(request.data.get("amount", "0.00")))
 
+        from accounts.settings_helper import BusinessSettingsHelper
+        if not BusinessSettingsHelper.is_feature_enabled("COUPONS"):
+            return Response(
+                {"is_valid": False, "message": "Coupons and promotional discounts are currently disabled."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         if not code:
             return Response(
                 {"error": "Coupon code required."}, status=status.HTTP_400_BAD_REQUEST

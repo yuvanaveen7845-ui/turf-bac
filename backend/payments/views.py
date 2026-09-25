@@ -6,7 +6,10 @@ from datetime import datetime, timedelta
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.db import transaction, models
-from django.http import HttpResponse
+from django.db.models import Sum, Q, Count, Avg
+from django.http import HttpResponse, HttpResponseRedirect
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from django.conf import settings
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
@@ -33,6 +36,7 @@ from accounts.permissions import (
     IsStaffOrAdmin,
     CanProcessRefunds,
 )
+from accounts.settings_helper import BusinessSettingsHelper
 from realtime.events import publish_event
 
 
@@ -55,6 +59,15 @@ class CreateRazorpayOrderView(views.APIView):
         payment_type = request.data.get("payment_type", "FULL")
         notes = request.data.get("notes", "")
         participants = request.data.get("participants", [])
+
+        if not BusinessSettingsHelper.is_feature_enabled("ONLINE_PAYMENTS"):
+            return Response(
+                {"error": "Online payment gateway is currently disabled by administration."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if payment_type == "PARTIAL" and not BusinessSettingsHelper.is_feature_enabled("PARTIAL_PAYMENTS"):
+            payment_type = "FULL"
 
         if not turf_id or not date_str or not slot_ids:
             return Response(
@@ -164,8 +177,8 @@ class CreateRazorpayOrderView(views.APIView):
             if payment_type == "FULL":
                 amount_to_charge = final_amt
             else:
-                # 50% partial deposit
-                amount_to_charge = round(final_amt * Decimal("0.50"), 2)
+                deposit_fraction = BusinessSettingsHelper.get_advance_deposit_fraction()
+                amount_to_charge = round(final_amt * deposit_fraction, 2)
 
             booking_id = Booking.generate_booking_id(date_obj)
             booking = Booking.objects.create(
@@ -374,7 +387,7 @@ class VerifyRazorpayPaymentView(views.APIView):
             payment.completed_at = now
             payment.save()
 
-            booking.status = "CANCELLED"
+            booking.transition_to("CANCELLED")
             booking.cancel_reason = "Hold expired and slot claimed by another customer."
             booking.save()
 
@@ -409,7 +422,8 @@ class VerifyRazorpayPaymentView(views.APIView):
         # Update Booking state to CONFIRMED
         booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
         booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
-        booking.status = "CONFIRMED"
+        if booking.can_transition_to("CONFIRMED"):
+            booking.transition_to("CONFIRMED")
         booking.save()
 
         # Mark all slots permanently BOOKED
@@ -698,6 +712,116 @@ class VerifyBalanceRazorpayPaymentView(views.APIView):
         )
 
 
+@method_decorator(csrf_exempt, name="dispatch")
+class RazorpayCallbackView(views.APIView):
+    """
+    Direct HTTP POST / GET Callback handler for Razorpay redirect flows.
+    Handles bank 3DS / Netbanking / UPI synchronous redirects from Razorpay gateway.
+    Verifies signature, transitions booking/wallet, and redirects customer to the React app confirmation page.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        return self._handle_callback(request)
+
+    def get(self, request, *args, **kwargs):
+        return self._handle_callback(request)
+
+    def _handle_callback(self, request):
+        data = request.POST if request.method == "POST" else request.GET
+        razorpay_order_id = data.get("razorpay_order_id")
+        razorpay_payment_id = data.get("razorpay_payment_id")
+        razorpay_signature = data.get("razorpay_signature")
+        error_code = data.get("error[code]") or data.get("error_code")
+        error_description = data.get("error[description]") or data.get("error_description")
+
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+        if error_code or not razorpay_payment_id or not razorpay_order_id:
+            # Fallback redirect to frontend callback handler or my-bookings
+            if razorpay_order_id:
+                return HttpResponseRedirect(
+                    f"{frontend_url}/payment-callback?razorpay_order_id={razorpay_order_id}&error_code={error_code or 'FAILED'}&error_description={error_description or 'Payment failed'}"
+                )
+            return HttpResponseRedirect(f"{frontend_url}/my-bookings?payment_status=failed")
+
+        # 1. Locate payment record
+        payment = Payment.objects.filter(provider_order_id=razorpay_order_id).first()
+        
+        # 2. Cryptographic signature check
+        is_valid = RazorpayService.verify_payment_signature(
+            razorpay_order_id=razorpay_order_id,
+            razorpay_payment_id=razorpay_payment_id,
+            razorpay_signature=razorpay_signature or "",
+        )
+
+        if not is_valid:
+            if payment:
+                payment.status = "FAILED"
+                payment.failure_reason = "Cryptographic signature verification failed on callback."
+                payment.save(update_fields=["status", "failure_reason"])
+            return HttpResponseRedirect(f"{frontend_url}/checkout?error=PaymentSignatureVerificationFailed")
+
+        now = timezone.now()
+
+        if payment:
+            # Check if payment was already confirmed
+            if payment.status not in ("PAID", "SUCCESSFUL"):
+                payment.status = "PAID"
+                payment.provider_payment_id = razorpay_payment_id
+                payment.provider_signature = razorpay_signature or ""
+                payment.paid_at = now
+                payment.completed_at = now
+                payment.save()
+
+            booking = payment.booking
+            if booking:
+                if payment.payment_type == "BALANCE":
+                    booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
+                    booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
+                    booking.save(update_fields=["amount_paid", "balance_due", "updated_at"])
+                    try:
+                        QRService.generate_qr_for_booking(booking)
+                    except Exception:
+                        pass
+                    return HttpResponseRedirect(f"{frontend_url}/confirmation/{booking.booking_id}")
+                else:
+                    booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
+                    booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
+                    if booking.can_transition_to("CONFIRMED"):
+                        booking.transition_to("CONFIRMED")
+                    booking.save(update_fields=["status", "amount_paid", "balance_due", "updated_at"])
+
+                    for slot in booking.slots.all():
+                        slot.status = "BOOKED"
+                        slot.locked_until = None
+                        slot.locked_by = None
+                        slot.save(update_fields=["status", "locked_until", "locked_by"])
+
+                    if booking.coupon_code:
+                        coupon = Coupon.objects.filter(code__iexact=booking.coupon_code).first()
+                        if coupon:
+                            coupon.usage_count += 1
+                            coupon.save(update_fields=["usage_count"])
+
+                    try:
+                        QRService.generate_qr_for_booking(booking)
+                    except Exception:
+                        pass
+
+                    try:
+                        EmailNotificationService.send_booking_confirmation_email(booking)
+                    except Exception:
+                        pass
+
+                    return HttpResponseRedirect(f"{frontend_url}/confirmation/{booking.booking_id}")
+
+        # Wallet or other transaction fallback
+        return HttpResponseRedirect(
+            f"{frontend_url}/payment-callback?razorpay_order_id={razorpay_order_id}&razorpay_payment_id={razorpay_payment_id}&razorpay_signature={razorpay_signature or ''}"
+        )
+
+
 class WalletBookingPaymentView(views.APIView):
     """
     Instant 1-Click checkout using Turf Cash Wallet balance:
@@ -964,7 +1088,8 @@ class RazorpayWebhookView(views.APIView):
                         booking = Booking.objects.select_for_update().get(pk=payment.booking.pk)
                         booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
                         booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
-                        booking.status = "CONFIRMED"
+                        if booking.can_transition_to("CONFIRMED"):
+                            booking.transition_to("CONFIRMED")
                         booking.save()
 
                         for slot in booking.slots.all():
@@ -1226,30 +1351,249 @@ class RefundListView(views.APIView):
         return [IsStaffOrAdmin()]
 
     def get(self, request):
-        refunds = Refund.objects.all().select_related("payment", "booking", "booking__customer").order_by("-created_at")[:100]
+        refunds = Refund.objects.all().select_related("payment", "booking", "booking__customer").order_by("-created_at")[:150]
         return Response(RefundSerializer(refunds, many=True).data)
 
+    @transaction.atomic
     def post(self, request):
         booking_id = request.data.get("booking_id")
         payment_id = request.data.get("payment_id")
+        amount_input = request.data.get("amount")
+        refund_to = request.data.get("refund_to", "WALLET").upper()
+        reason = request.data.get("reason", "Admin requested booking refund").strip()
 
+        if refund_to not in ["WALLET", "ORIGINAL", "CASH"]:
+            refund_to = "WALLET"
+
+        booking = None
         payment = None
-        if payment_id:
-            payment = Payment.objects.filter(payment_id=payment_id).first()
-        elif booking_id:
-            if str(booking_id).isdigit():
-                payment = Payment.objects.filter(booking_id=int(booking_id), status__in=["PAID", "SUCCESSFUL"]).order_by("-created_at").first()
-            else:
-                payment = Payment.objects.filter(booking__booking_id=booking_id, status__in=["PAID", "SUCCESSFUL"]).order_by("-created_at").first()
 
-        if not payment:
+        # 1. Resolve Payment or Booking
+        if payment_id:
+            payment = Payment.objects.select_for_update().filter(payment_id=payment_id).first()
+            if payment:
+                booking = payment.booking
+        if not booking and booking_id:
+            if str(booking_id).isdigit():
+                booking = Booking.objects.select_for_update().filter(pk=int(booking_id)).first()
+            if not booking:
+                booking = Booking.objects.select_for_update().filter(booking_id=booking_id).first()
+
+        if not booking and not payment:
             return Response(
-                {"error": "No eligible paid transaction found to refund for this booking."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Please provide a valid Booking ID or Payment ID to process a refund."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Delegate to ProcessRefundView logic
-        return ProcessRefundView().post(request, pk=payment.pk)
+        # 2. Check if booking has any paid funds
+        total_paid = Decimal(str(booking.amount_paid or 0))
+        if total_paid <= Decimal("0.00"):
+            return Response(
+                {
+                    "error": f"Booking #{booking.booking_id} has ₹0 paid. There are no funds available to refund.",
+                    "code": "ZERO_BALANCE_PAID",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 3. Calculate prior completed refunds for this booking
+        prior_refunds = Refund.objects.filter(
+            booking=booking,
+            status__in=["COMPLETED", "PROCESSING", "REQUESTED"],
+        ).aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
+        prior_refunds = Decimal(str(prior_refunds))
+
+        remaining_refundable = max(Decimal("0.00"), total_paid - prior_refunds)
+        if remaining_refundable <= Decimal("0.00"):
+            return Response(
+                {
+                    "error": f"Booking #{booking.booking_id} has already been fully refunded (Paid: ₹{total_paid}, Refunded: ₹{prior_refunds}).",
+                    "code": "ALREADY_FULLY_REFUNDED",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 4. Parse & Validate requested refund amount
+        if amount_input is not None:
+            try:
+                refund_amount = Decimal(str(amount_input))
+            except Exception:
+                refund_amount = remaining_refundable
+        else:
+            refund_amount = remaining_refundable
+
+        if refund_amount <= Decimal("0.00"):
+            return Response(
+                {"error": "Refund amount must be greater than zero."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if refund_amount > remaining_refundable:
+            return Response(
+                {
+                    "error": f"Refund amount ₹{refund_amount} exceeds remaining refundable balance ₹{remaining_refundable} (Total Paid: ₹{total_paid}, Already Refunded: ₹{prior_refunds}).",
+                    "code": "EXCEEDS_REFUNDABLE_LIMIT",
+                    "max_refundable": float(remaining_refundable),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # 5. Resolve or Synthesize Base Payment Record
+        if not payment:
+            payment = (
+                Payment.objects.select_for_update()
+                .filter(booking=booking, status__in=["PAID", "SUCCESSFUL", "CONFIRMED"])
+                .order_by("-created_at")
+                .first()
+            )
+
+        if not payment:
+            # Self-healing: create an authoritative reconciled payment row so that
+            # payment ledger references and accounting remain 100% integral
+            payment_id_gen = Payment.generate_payment_id()
+            payment = Payment.objects.create(
+                payment_id=payment_id_gen,
+                booking=booking,
+                customer=booking.customer,
+                provider="DIRECT",
+                amount=total_paid,
+                currency="INR",
+                payment_method="CASH" if booking.booking_type == "WALK_IN" else "UPI",
+                payment_type="FULL",
+                transaction_reference=f"RECON-{uuid.uuid4().hex[:8].upper()}",
+                status="PAID",
+                paid_at=booking.created_at,
+                completed_at=booking.created_at,
+                collected_by=request.user,
+                notes=f"Reconciled base transaction synthesized for refund tracking (#{booking.booking_id})",
+                gateway_response={"synthesized_for_refund": True},
+            )
+
+        # 6. Execute Gateway Refund if ORIGINAL and Razorpay online transaction
+        provider_refund_id = ""
+        if refund_to == "ORIGINAL" and payment.provider == "RAZORPAY" and payment.provider_payment_id:
+            rzp_res = RazorpayService.initiate_refund(
+                razorpay_payment_id=payment.provider_payment_id,
+                amount_in_rupees=refund_amount,
+                notes={"reason": reason, "booking_id": booking.booking_id},
+            )
+            if rzp_res.get("success"):
+                provider_refund_id = rzp_res.get("refund_id", "")
+            else:
+                return Response(
+                    {"error": f"Razorpay Gateway refund failed: {rzp_res.get('error')}"},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+
+        # 7. Create Official Refund Record
+        refund_id = f"REF-{uuid.uuid4().hex[:8].upper()}"
+        refund = Refund.objects.create(
+            refund_id=refund_id,
+            payment=payment,
+            booking=booking,
+            provider_refund_id=provider_refund_id,
+            amount=refund_amount,
+            refund_type="FULL" if (prior_refunds + refund_amount) >= total_paid else "PARTIAL",
+            refund_to=refund_to,
+            status="COMPLETED",
+            reason=reason,
+            reference_id=f"RREF-{uuid.uuid4().hex[:10].upper()}",
+            initiated_by=request.user,
+            completed_at=timezone.now(),
+        )
+
+        # 8. Credit Customer Turf Wallet if WALLET destination
+        if refund_to == "WALLET" and booking.customer:
+            from accounts.models import CustomerProfile
+            prof = CustomerProfile.objects.select_for_update().filter(user=booking.customer).first()
+            if prof:
+                prof.wallet_balance = Decimal(str(prof.wallet_balance)) + refund_amount
+                prof.save()
+
+                WalletTransaction.objects.create(
+                    customer=booking.customer,
+                    amount=refund_amount,
+                    transaction_type="CREDIT",
+                    source="REFUND",
+                    reference_id=refund_id,
+                    description=f"Refund for match #{booking.booking_id}: {reason}",
+                    balance_after=prof.wallet_balance,
+                )
+
+        # 9. Update Payment & Booking Financial Balance
+        total_now_refunded = prior_refunds + refund_amount
+        if total_now_refunded >= payment.amount:
+            payment.status = "REFUNDED"
+        else:
+            payment.status = "PARTIALLY_REFUNDED"
+        payment.save()
+
+        # Deduct refunded amount from booking amount_paid to maintain financial balance
+        booking.amount_paid = max(Decimal("0.00"), Decimal(str(booking.amount_paid)) - refund_amount)
+        booking.balance_due = max(Decimal("0.00"), Decimal(str(booking.final_amount)) - booking.amount_paid)
+
+        # Transition booking to CANCELLED if fully refunded and not yet completed
+        if total_now_refunded >= total_paid:
+            if booking.status in ["CONFIRMED", "PAYMENT_PENDING", "NO_SHOW", "UPCOMING"]:
+                if booking.can_transition_to("CANCELLED"):
+                    booking.transition_to("CANCELLED")
+                # Release reserved future slots if booking was cancelled
+                if booking.date >= timezone.now().date():
+                    for s in booking.slots.all():
+                        s.status = "AVAILABLE"
+                        s.booking_id = ""
+                        s.locked_until = None
+                        s.locked_by = None
+                        s.save()
+        booking.save()
+
+        # 10. Notifications, Auditing & Real-time Event
+        Notification.objects.create(
+            user=booking.customer,
+            notification_type="REFUND_PROCESSED",
+            title=f"Refund Processed (₹{refund_amount})",
+            message=f"Refund of ₹{refund_amount} for booking #{booking.booking_id} has been processed via {refund_to}.",
+            data={"refund_id": refund_id, "booking_id": booking.booking_id, "amount": float(refund_amount)},
+        )
+
+        AuditLog.objects.create(
+            user=request.user,
+            action="REFUND_PROCESSED",
+            resource_type="BOOKING",
+            resource_id=booking.booking_id,
+            details={
+                "refund_id": refund_id,
+                "amount": float(refund_amount),
+                "refund_to": refund_to,
+                "provider_refund_id": provider_refund_id,
+                "reason": reason,
+                "remaining_refundable": float(max(Decimal("0.00"), remaining_refundable - refund_amount)),
+            },
+        )
+
+        publish_event(
+            channel="operations",
+            event_type="REFUND_PROCESSED",
+            payload={
+                "refund_id": refund_id,
+                "booking_id": booking.booking_id,
+                "amount": float(refund_amount),
+                "refund_to": refund_to,
+                "customer_name": booking.customer.get_full_name() or booking.customer.email,
+                "processed_by": request.user.get_full_name() or request.user.email,
+                "timestamp": timezone.localtime(timezone.now()).strftime("%Y-%m-%d %I:%M %p"),
+            },
+        )
+
+        return Response(
+            {
+                "success": True,
+                "refund": RefundSerializer(refund).data,
+                "remaining_refundable": float(max(Decimal("0.00"), remaining_refundable - refund_amount)),
+                "message": f"Successfully processed ₹{refund_amount:.2f} refund via {refund_to} for #{booking.booking_id}.",
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 
@@ -1332,8 +1676,8 @@ class ManualCollectPaymentView(views.APIView):
         booking.amount_paid = min(booking.final_amount, booking.amount_paid + amount)
         booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
 
-        if booking.status in ["PAYMENT_PENDING", "PENDING"]:
-            booking.status = "CONFIRMED"
+        if booking.can_transition_to("CONFIRMED"):
+            booking.transition_to("CONFIRMED")
         booking.save()
 
         # Mark all slots booked

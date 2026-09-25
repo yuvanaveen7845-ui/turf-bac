@@ -1053,6 +1053,9 @@ class FeatureFlagsView(views.APIView):
         record.updated_by = user
         record.save()
 
+        from .settings_helper import BusinessSettingsHelper
+        BusinessSettingsHelper.invalidate_cache("features")
+
         AuditLog.objects.create(
             user=user,
             action="FEATURE_FLAGS_UPDATED",

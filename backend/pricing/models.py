@@ -57,6 +57,9 @@ class PricingRule(models.Model):
 
     class Meta:
         ordering = ["-priority", "id"]
+        indexes = [
+            models.Index(fields=["is_active", "priority"], name="pricing_act_prio_idx"),
+        ]
 
     def __str__(self):
         sign = "+" if self.adjustment_value > 0 else ""
@@ -77,9 +80,14 @@ class Holiday(models.Model):
 class SpecialEvent(models.Model):
     name = models.CharField(max_length=150)
     turf = models.ForeignKey(Turf, null=True, blank=True, on_delete=models.CASCADE)
-    date = models.DateField()
+    date = models.DateField(db_index=True)
     surge_multiplier = models.DecimalField(max_digits=4, decimal_places=2, default=1.30)
     notes = models.TextField(blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["date"], name="spevent_date_idx"),
+        ]
 
     def __str__(self):
         return f"{self.name} on {self.date}"

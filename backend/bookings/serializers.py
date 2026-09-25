@@ -17,6 +17,19 @@ class BookingSerializer(serializers.ModelSerializer):
     customer_details = UserSerializer(source="customer", read_only=True)
     slots_data = TimeSlotSerializer(source="slots", many=True, read_only=True)
     qr_ticket_data = serializers.SerializerMethodField()
+    already_refunded = serializers.SerializerMethodField()
+    refundable_amount = serializers.SerializerMethodField()
+
+    def get_already_refunded(self, obj):
+        from django.db.models import Sum
+        from decimal import Decimal
+        total = obj.refunds.filter(status__in=["COMPLETED", "PROCESSING"]).aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
+        return float(total)
+
+    def get_refundable_amount(self, obj):
+        paid = float(obj.amount_paid or 0)
+        refunded = self.get_already_refunded(obj)
+        return max(0.0, round(paid - refunded, 2))
 
     def get_qr_ticket_data(self, obj):
         cred = getattr(obj, "qr_credential", None)
@@ -55,6 +68,8 @@ class BookingSerializer(serializers.ModelSerializer):
             "final_amount",
             "amount_paid",
             "balance_due",
+            "already_refunded",
+            "refundable_amount",
             "coupon_code",
             "pricing_breakdown",
             "participants",

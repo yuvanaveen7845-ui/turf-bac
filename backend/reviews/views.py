@@ -32,6 +32,13 @@ class ReviewListCreateView(views.APIView):
         return Response(serializer.data)
 
     def post(self, request):
+        from accounts.settings_helper import BusinessSettingsHelper
+        if not BusinessSettingsHelper.is_feature_enabled("REVIEWS"):
+            return Response(
+                {"error": "Player reviews and ratings are currently disabled by administration."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         booking_id = request.data.get("booking_id")
         booking = get_object_or_404(Booking, booking_id=booking_id)
 

@@ -116,7 +116,8 @@ class ReconciliationEngine:
 
                 booking.amount_paid += pay.amount
                 booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
-                booking.status = "CONFIRMED"
+                if booking.can_transition_to("CONFIRMED"):
+                    booking.transition_to("CONFIRMED")
                 booking.save()
 
                 for slot in booking.slots.all():

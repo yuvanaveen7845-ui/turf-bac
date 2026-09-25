@@ -73,6 +73,11 @@ class Turf(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["is_active", "sport_type"], name="turf_active_sport_idx"),
+        ]
+
     def __str__(self):
         return f"{self.name} - {self.location}"
 
@@ -109,7 +114,9 @@ class TimeSlot(models.Model):
         ordering = ["date", "start_time"]
         unique_together = ("turf", "date", "start_time")
         indexes = [
-            models.Index(fields=["turf", "date", "status"]),
+            models.Index(fields=["turf", "date", "status"], name="slot_turf_date_stat_idx"),
+            models.Index(fields=["status", "locked_until"], name="slot_lock_exp_idx"),
+            models.Index(fields=["turf", "date", "start_time"], name="slot_schedule_idx"),
         ]
 
     def __str__(self):

@@ -476,7 +476,7 @@ class QRService:
             payment_warning = None
 
             # Mark Booking Checked In
-            locked_booking.status = "CHECKED_IN"
+            locked_booking.transition_to("CHECKED_IN")
             locked_booking.checked_in_at = now
             locked_booking.checked_in_by = staff_user
             locked_booking.save()

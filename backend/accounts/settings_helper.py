@@ -66,6 +66,18 @@ DEFAULT_BUSINESS_SETTINGS = {
     "auth": {
         "google_client_id": "",
     },
+    "features": {
+        "RECURRING_BOOKINGS": True,
+        "PARTIAL_PAYMENTS": True,
+        "WALK_IN_BOOKINGS": True,
+        "DYNAMIC_PRICING": True,
+        "QR_CHECKIN": True,
+        "ONLINE_PAYMENTS": True,
+        "OFFLINE_PAYMENTS": True,
+        "COUPONS": True,
+        "REVIEWS": True,
+        "ADVANCED_REPORTING": True,
+    },
 }
 
 
@@ -136,6 +148,17 @@ class BusinessSettingsHelper:
     @classmethod
     def get_checkin_settings(cls) -> Dict[str, Any]:
         return cls.get_section("checkin")
+
+    @classmethod
+    def get_features(cls) -> Dict[str, bool]:
+        return cls.get_section("features")
+
+    @classmethod
+    def is_feature_enabled(cls, feature_name: str, default: bool = True) -> bool:
+        features = cls.get_features()
+        if not isinstance(features, dict):
+            return default
+        return bool(features.get(feature_name, default))
 
     @classmethod
     def get_notification_settings(cls) -> Dict[str, Any]:

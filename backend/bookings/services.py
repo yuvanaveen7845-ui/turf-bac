@@ -65,6 +65,11 @@ class BookingEngine:
             if date_obj < current_date:
                 return False, "Cannot reserve time slots for a past date."
 
+            booking_rules = BusinessSettingsHelper.get_booking_rules()
+            max_advance_days = int(booking_rules.get("advanceBookingDays", 14))
+            if (date_obj - current_date).days > max_advance_days:
+                return False, f"Slots can only be reserved up to {max_advance_days} days in advance."
+
             for slot in slots:
                 if date_obj == current_date and slot.start_time <= current_time:
                     return (
@@ -178,6 +183,16 @@ class BookingEngine:
                 .filter(id__in=slot_ids, turf=turf, date=date_obj)
                 .order_by("start_time")
             )
+            current_local = timezone.localtime(timezone.now())
+            current_date = current_local.date()
+            if date_obj < current_date:
+                raise ValueError("Cannot book time slots for a past date.")
+
+            booking_rules = BusinessSettingsHelper.get_booking_rules()
+            max_advance_days = int(booking_rules.get("advanceBookingDays", 14))
+            if (date_obj - current_date).days > max_advance_days:
+                raise ValueError(f"Slots can only be booked up to {max_advance_days} days in advance.")
+
             if not slots or len(slots) != len(slot_ids):
                 raise ValueError("Selected slots are invalid or no longer available.")
 
@@ -199,6 +214,19 @@ class BookingEngine:
                     raise ValueError(
                         f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."
                     )
+            # Feature Flag Validations
+            if booking_type == "RECURRING" and not BusinessSettingsHelper.is_feature_enabled("RECURRING_BOOKINGS"):
+                raise ValueError("Recurring squad & league bookings are currently disabled by administration.")
+            if booking_type == "WALK_IN" and not BusinessSettingsHelper.is_feature_enabled("WALK_IN_BOOKINGS"):
+                raise ValueError("Physical ground walk-in bookings are currently disabled by administration.")
+            if payment_type == "PARTIAL" and not BusinessSettingsHelper.is_feature_enabled("PARTIAL_PAYMENTS"):
+                raise ValueError("Split advance deposit payments are currently disabled.")
+            if coupon_code and not BusinessSettingsHelper.is_feature_enabled("COUPONS"):
+                raise ValueError("Promotions and coupons are currently disabled.")
+            if payment_method in ["CASH", "OFFLINE"] and not BusinessSettingsHelper.is_feature_enabled("OFFLINE_PAYMENTS"):
+                raise ValueError("Offline / cash payments are currently disabled.")
+            if payment_method in ["RAZORPAY", "ONLINE"] and not BusinessSettingsHelper.is_feature_enabled("ONLINE_PAYMENTS"):
+                raise ValueError("Online gateway payments are currently disabled.")
 
             # Validate coupon if given
             coupon = None
@@ -342,10 +370,7 @@ class BookingEngine:
         with transaction.atomic():
             # Lock booking and slots
             booking = Booking.objects.select_for_update().get(pk=booking.pk)
-            if booking.status in ("CANCELLED", "COMPLETED", "CHECKED_IN", "IN_PROGRESS"):
-                raise ValueError(f"Cannot cancel booking in {booking.status} status.")
-
-            booking.status = "CANCELLED"
+            booking.transition_to("CANCELLED")
             booking.cancelled_at = timezone.now()
             booking.cancel_reason = reason
             booking.save()
@@ -380,6 +405,45 @@ class BookingEngine:
                         description=f"Refund for cancelled match {booking.booking_id} ({policy_rule})",
                         balance_after=prof.wallet_balance,
                     )
+
+                    # Create official Refund ledger record
+                    try:
+                        import uuid
+                        from payments.models import Payment, Refund
+                        payment = Payment.objects.filter(booking=booking, status__in=["PAID", "SUCCESSFUL"]).order_by("-created_at").first()
+                        if not payment:
+                            payment = Payment.objects.create(
+                                payment_id=Payment.generate_payment_id(),
+                                booking=booking,
+                                customer=booking.customer,
+                                provider="DIRECT",
+                                amount=Decimal(str(booking.amount_paid or refund_amount)),
+                                currency="INR",
+                                payment_method="CASH" if booking.booking_type == "WALK_IN" else "UPI",
+                                payment_type="FULL",
+                                transaction_reference=f"RECON-{uuid.uuid4().hex[:8].upper()}",
+                                status="PAID",
+                                paid_at=booking.created_at,
+                                completed_at=booking.created_at,
+                                notes=f"Reconciled transaction synthesized during cancellation refund (#{booking.booking_id})",
+                            )
+
+                        refund_id = f"REF-{uuid.uuid4().hex[:8].upper()}"
+                        Refund.objects.create(
+                            refund_id=refund_id,
+                            payment=payment,
+                            booking=booking,
+                            amount=refund_amount,
+                            refund_type="FULL" if cancellation_fee == 0 else "PARTIAL",
+                            refund_to="WALLET",
+                            status="COMPLETED",
+                            reason=f"Cancellation refund ({policy_rule}): {reason}",
+                            reference_id=f"RREF-{uuid.uuid4().hex[:10].upper()}",
+                            initiated_by=user if user and user.is_authenticated else None,
+                            completed_at=timezone.now(),
+                        )
+                    except Exception as ref_err:
+                        logger.warning(f"Could not persist ledger Refund row for {booking.booking_id}: {ref_err}")
 
             # Send Notification & Audit
             fee_note = f" (Fee of ₹{cancellation_fee} applied: {policy_rule})" if cancellation_fee > 0 else ""
@@ -422,7 +486,7 @@ class BookingEngine:
         """
         with transaction.atomic():
             booking = Booking.objects.select_for_update().get(pk=booking.pk)
-            if booking.status not in ("CONFIRMED", "UPCOMING", "PAYMENT_PENDING"):
+            if not booking.can_transition_to("CANCELLED"):
                 raise ValueError(f"Cannot reschedule booking in {booking.status} status.")
 
             new_slots = list(
@@ -432,6 +496,16 @@ class BookingEngine:
             )
             if not new_slots or len(new_slots) != len(new_slot_ids):
                 raise ValueError("One or more requested slots on the new date are not available.")
+
+            # Validate contiguous / consecutive hours for multi-slot reschedule
+            if len(new_slots) > 1:
+                for i in range(len(new_slots) - 1):
+                    if new_slots[i].end_time != new_slots[i + 1].start_time:
+                        raise ValueError(
+                            f"Rescheduled slots must be consecutive hours ("
+                            f"{new_slots[i].start_time.strftime('%H:%M')}-{new_slots[i].end_time.strftime('%H:%M')} and "
+                            f"{new_slots[i+1].start_time.strftime('%H:%M')}-{new_slots[i+1].end_time.strftime('%H:%M')} are not contiguous)."
+                        )
 
             for slot in new_slots:
                 if slot.status == "BOOKED":
@@ -565,8 +639,8 @@ class BookingEngine:
 
             booking.amount_paid += pay_amt
             booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
-            if booking.status in ("PAYMENT_PENDING", "UPCOMING"):
-                booking.status = "CONFIRMED"
+            if booking.can_transition_to("CONFIRMED"):
+                booking.transition_to("CONFIRMED")
             booking.save()
 
             # Ensure all slots are permanently BOOKED

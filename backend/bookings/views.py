@@ -112,9 +112,10 @@ class LockSlotView(views.APIView):
             },
         )
 
+        lock_mins = int(result.get("lock_duration_seconds", 300) / 60) if isinstance(result, dict) else 5
         return Response(
             {
-                "message": "Slots temporarily reserved for 5 minutes.",
+                "message": f"Slots temporarily reserved for {lock_mins} minutes.",
                 "locked_until": result.get("locked_until"),
                 "expires_at": result.get("expires_at"),
                 "lock_duration_seconds": result.get("lock_duration_seconds", 300),

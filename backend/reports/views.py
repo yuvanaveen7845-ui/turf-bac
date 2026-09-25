@@ -134,6 +134,13 @@ class BusinessReportsView(views.APIView):
     permission_classes = [IsStaffOrAdmin]
 
     def get(self, request):
+        from accounts.settings_helper import BusinessSettingsHelper
+        if not BusinessSettingsHelper.is_feature_enabled("ADVANCED_REPORTING"):
+            return Response(
+                {"error": "Advanced financial reporting and KPI analytics are currently disabled by administration."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         start_date_str = request.query_params.get("start_date")
         end_date_str = request.query_params.get("end_date")
         turf_id = request.query_params.get("turf_id")
@@ -189,6 +196,13 @@ class ExportReportsCSVView(views.APIView):
     permission_classes = [IsStaffOrAdmin]
 
     def get(self, request):
+        from accounts.settings_helper import BusinessSettingsHelper
+        if not BusinessSettingsHelper.is_feature_enabled("ADVANCED_REPORTING"):
+            return Response(
+                {"error": "Report CSV export is currently disabled by administration."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         report_type = request.query_params.get("type", "bookings")
         response = HttpResponse(content_type="text/csv")
 
@@ -1133,10 +1147,10 @@ class OperationsMarkNoShowView(views.APIView):
         if not booking:
             return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if booking.status in ["CHECKED_IN", "COMPLETED"]:
+        if not booking.can_transition_to("NO_SHOW"):
             return Response({"error": f"Cannot mark a {booking.status} booking as NO_SHOW."}, status=status.HTTP_400_BAD_REQUEST)
 
-        booking.status = "NO_SHOW"
+        booking.transition_to("NO_SHOW")
         booking.save()
 
         AuditLog.objects.create(

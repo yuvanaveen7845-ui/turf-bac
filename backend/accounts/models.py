@@ -9,10 +9,27 @@ from django.contrib.auth.models import (
     BaseUserManager,
 )
 from django.utils import timezone
+from django.core.exceptions import PermissionDenied
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
 
+PROTECTED_SUPERADMIN_EMAILS = {"friendsturf171@gmail.com"}
+
+
+class UserQuerySet(models.QuerySet):
+    def delete(self):
+        for protected in PROTECTED_SUPERADMIN_EMAILS:
+            if self.filter(email__iexact=protected).exists():
+                raise PermissionDenied(
+                    f"Permanent system administrator '{protected}' is protected and cannot be deleted."
+                )
+        return super().delete()
 
 
 class UserManager(BaseUserManager):
+    def get_queryset(self):
+        return UserQuerySet(self.model, using=self._db)
+
     def create_user(self, email, password=None, **extra_fields):
         if not email:
             raise ValueError("Email address is required")
@@ -88,7 +105,24 @@ class User(AbstractBaseUser, PermissionsMixin):
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["first_name"]
 
+    PROTECTED_SUPERADMIN_EMAILS = PROTECTED_SUPERADMIN_EMAILS
+
+    def is_permanent_admin(self) -> bool:
+        """Returns True if user is a designated undeletable root system administrator."""
+        return bool(self.email and self.email.strip().lower() in PROTECTED_SUPERADMIN_EMAILS)
+
     def save(self, *args, **kwargs):
+        # Prevent mutating the email address of the permanent superadmin
+        if self.pk:
+            orig = User.objects.filter(pk=self.pk).values("email").first()
+            if (
+                orig
+                and orig["email"].strip().lower() in PROTECTED_SUPERADMIN_EMAILS
+                and self.email.strip().lower() != orig["email"].strip().lower()
+            ):
+                raise PermissionDenied(
+                    f"Cannot change email address of permanent system administrator '{orig['email']}'."
+                )
         if not self.referral_code:
             code = f"FT{uuid.uuid4().hex[:6].upper()}"
             while User.objects.filter(referral_code=code).exists():
@@ -99,6 +133,13 @@ class User(AbstractBaseUser, PermissionsMixin):
             CustomerProfile.objects.get_or_create(user=self)
         elif self.role in ("STAFF", "ADMIN"):
             StaffProfile.objects.get_or_create(user=self)
+
+    def delete(self, *args, **kwargs):
+        if self.is_permanent_admin():
+            raise PermissionDenied(
+                f"Permanent system administrator '{self.email}' is protected and cannot be deleted."
+            )
+        return super().delete(*args, **kwargs)
 
     def __str__(self):
         return f"{self.email} ({self.role}) [{self.status}]"
@@ -307,4 +348,20 @@ class BusinessSetting(models.Model):
 
     def __str__(self):
         return self.key
+
+
+@receiver(pre_delete, sender=User)
+def protect_permanent_admin_pre_delete(sender, instance, **kwargs):
+    if instance.is_permanent_admin():
+        raise PermissionDenied(
+            f"Permanent system administrator '{instance.email}' is protected and cannot be deleted."
+        )
+
+
+@receiver(pre_delete, sender=StaffProfile)
+def protect_permanent_admin_staff_profile_pre_delete(sender, instance, **kwargs):
+    if instance.user and instance.user.is_permanent_admin():
+        raise PermissionDenied(
+            "Cannot delete staff profile belonging to permanent system administrator."
+        )
 

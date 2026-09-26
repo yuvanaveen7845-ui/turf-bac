@@ -29,7 +29,7 @@ class Booking(models.Model):
     customer = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bookings"
     )
-    turf = models.ForeignKey(Turf, on_delete=models.CASCADE, related_name="bookings")
+    turf = models.ForeignKey(Turf, on_delete=models.PROTECT, related_name="bookings")
     date = models.DateField(db_index=True)
     start_time = models.TimeField()
     end_time = models.TimeField()

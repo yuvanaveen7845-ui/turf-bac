@@ -239,3 +239,116 @@ class AccountsAuthTests(TestCase):
         self.admin_user.refresh_from_db()
         self.assertEqual(self.admin_user.google_id, "google-sub-admin-999")
         self.assertEqual(self.admin_user.role, "ADMIN")
+
+
+class PermanentAdminProtectionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        from django.core.exceptions import PermissionDenied
+        self.PermissionDenied = PermissionDenied
+
+        self.root_admin = User.objects.create_superuser(
+            email="friendsturf171@gmail.com",
+            password="friendsturf@12345",
+            first_name="Friends Turf",
+            last_name="SuperAdmin",
+            phone="+91 99999 12345",
+        )
+        self.regular_admin = User.objects.create_superuser(
+            email="operations_admin@friendsturf.com",
+            password="AdminPassword123!",
+            first_name="Ops",
+            last_name="Admin",
+        )
+        self.regular_staff = User.objects.create_user(
+            email="regular_staff@friendsturf.com",
+            password="StaffPassword123!",
+            first_name="Staff",
+            last_name="One",
+            role="STAFF",
+        )
+
+    def test_permanent_admin_credentials_and_login(self):
+        response = self.client.post(
+            "/api/auth/login/",
+            {"email": "friendsturf171@gmail.com", "password": "friendsturf@12345"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["user"]["role"], "ADMIN")
+        self.assertTrue(response.data["user"]["is_permanent"])
+        self.assertEqual(response.data["user"]["email"], "friendsturf171@gmail.com")
+
+    def test_permanent_admin_cannot_be_deleted_via_instance(self):
+        with self.assertRaises(self.PermissionDenied):
+            self.root_admin.delete()
+        self.assertTrue(User.objects.filter(email="friendsturf171@gmail.com").exists())
+
+    def test_permanent_admin_cannot_be_deleted_via_filtered_queryset(self):
+        with self.assertRaises(self.PermissionDenied):
+            User.objects.filter(email="friendsturf171@gmail.com").delete()
+        self.assertTrue(User.objects.filter(email="friendsturf171@gmail.com").exists())
+
+    def test_permanent_admin_cannot_be_deleted_via_bulk_queryset(self):
+        with self.assertRaises(self.PermissionDenied):
+            User.objects.all().delete()
+        self.assertTrue(User.objects.filter(email="friendsturf171@gmail.com").exists())
+
+    def test_permanent_admin_email_cannot_be_mutated(self):
+        self.root_admin.email = "tampered_admin@gmail.com"
+        with self.assertRaises(self.PermissionDenied):
+            self.root_admin.save()
+        self.root_admin.refresh_from_db()
+        self.assertEqual(self.root_admin.email, "friendsturf171@gmail.com")
+
+    def test_normal_users_can_be_deleted_without_impact(self):
+        staff_id = self.regular_staff.id
+        self.regular_staff.delete()
+        self.assertFalse(User.objects.filter(id=staff_id).exists())
+
+    def test_permanent_admin_cannot_be_demoted_or_suspended_via_api(self):
+        self.client.force_authenticate(user=self.regular_admin)
+        # Attempt demotion to STAFF
+        res1 = self.client.patch(
+            f"/api/auth/b2b-users/{self.root_admin.id}/",
+            {"role": "STAFF"},
+            format="json",
+        )
+        self.assertEqual(res1.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cannot be demoted", res1.data["error"])
+
+        # Attempt suspension
+        res2 = self.client.patch(
+            f"/api/auth/b2b-users/{self.root_admin.id}/",
+            {"status": "SUSPENDED"},
+            format="json",
+        )
+        self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("cannot be suspended", res2.data["error"])
+
+        self.root_admin.refresh_from_db()
+        self.assertEqual(self.root_admin.role, "ADMIN")
+        self.assertEqual(self.root_admin.status, "ACTIVE")
+
+    def test_permanent_admin_cannot_be_deleted_via_api(self):
+        self.client.force_authenticate(user=self.regular_admin)
+        res = self.client.delete(f"/api/auth/b2b-users/{self.root_admin.id}/")
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn("cannot be deleted", res.data["error"])
+        self.assertTrue(User.objects.filter(email="friendsturf171@gmail.com").exists())
+
+    def test_normal_staff_can_be_managed_and_deleted_via_api(self):
+        self.client.force_authenticate(user=self.regular_admin)
+        # Suspend staff
+        res1 = self.client.patch(
+            f"/api/auth/b2b-users/{self.regular_staff.id}/",
+            {"status": "SUSPENDED"},
+            format="json",
+        )
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+
+        # Delete staff
+        res2 = self.client.delete(f"/api/auth/b2b-users/{self.regular_staff.id}/")
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertFalse(User.objects.filter(id=self.regular_staff.id).exists())
+

@@ -60,6 +60,9 @@ urlpatterns = [
     path("", api_root, name="api_root"),
     path("admin/", admin.site.urls),
     path("api/health/", health_check, name="health_check"),
+    path("api/health", health_check),
+    path("health/", health_check),
+    path("health", health_check),
     
     # API endpoints under both /api/... and direct /...
     path("api/", include(api_patterns)),

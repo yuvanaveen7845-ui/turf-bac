@@ -792,6 +792,19 @@ class AdminB2BUserDetailView(views.APIView):
         old_role = user.role
         old_status = user.status
 
+        # Permanent Superadmin Protection
+        if user.is_permanent_admin():
+            if "role" in data and data["role"] != "ADMIN":
+                return Response(
+                    {"error": f"The permanent root admin account '{user.email}' cannot be demoted."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if "status" in data and data["status"] != "ACTIVE":
+                return Response(
+                    {"error": f"The permanent root admin account '{user.email}' cannot be suspended or deactivated."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         if "role" in data:
             if not (
                 request.user.role == "ADMIN"
@@ -850,6 +863,35 @@ class AdminB2BUserDetailView(views.APIView):
         )
 
         return Response(UserSerializer(user).data)
+
+    def delete(self, request, pk):
+        user = generics.get_object_or_404(User, pk=pk)
+        if user.is_permanent_admin():
+            return Response(
+                {"error": f"The permanent root admin account '{user.email}' is protected and cannot be deleted."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not (
+            request.user.role == "ADMIN"
+            or request.user.is_superuser
+            or user_has_permission(request.user, "STAFF_EDIT")
+        ):
+            return Response(
+                {"error": "Permission denied: STAFF_EDIT required to remove staff members."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        user_email = user.email
+        user.delete()
+        AuditLog.objects.create(
+            user=request.user,
+            action="B2B_USER_DELETED",
+            resource_type="USER",
+            resource_id=user_email,
+            details={"deleted_email": user_email},
+        )
+        return Response({"message": f"User {user_email} deleted successfully."}, status=status.HTTP_200_OK)
 
 
 class BusinessSettingsView(views.APIView):

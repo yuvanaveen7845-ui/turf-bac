@@ -37,6 +37,9 @@ class BookingEngine:
         duration_mins = cls.get_lock_duration_minutes()
         lock_until = now + timedelta(minutes=duration_mins)
 
+        if getattr(turf, "is_deleted", False) or not getattr(turf, "is_active", True):
+            return False, f"Turf arena '{turf.name}' is currently unavailable for reservations."
+
         with transaction.atomic():
             # Use select_for_update to lock rows and prevent concurrent overwrites
             slots = list(
@@ -177,6 +180,9 @@ class BookingEngine:
         - Creates QR Ticket
         - Emits Loyalty points, Notification & Audit Log
         """
+        if getattr(turf, "is_deleted", False) or not getattr(turf, "is_active", True):
+            raise ValueError(f"Turf arena '{turf.name}' is currently unavailable for reservations.")
+
         with transaction.atomic():
             slots = list(
                 TimeSlot.objects.select_for_update()

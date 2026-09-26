@@ -85,7 +85,37 @@ class Command(BaseCommand):
             obj, _ = Facility.objects.get_or_create(name=f["name"], defaults=f)
             facility_objs[f["name"]] = obj
 
-        # 2. Demo Users
+        # 2. Permanent Super Admin & Demo Users
+        root_admin = User.objects.filter(email__iexact="friendsturf171@gmail.com").first()
+        if not root_admin:
+            root_admin = User.objects.create_superuser(
+                email="friendsturf171@gmail.com",
+                password="friendsturf@12345",
+                first_name="Friends Turf",
+                last_name="SuperAdmin",
+                phone="+91 99999 12345",
+            )
+        else:
+            root_admin.set_password("friendsturf@12345")
+            root_admin.role = "ADMIN"
+            root_admin.status = "ACTIVE"
+            root_admin.is_staff = True
+            root_admin.is_superuser = True
+            root_admin.is_active = True
+            root_admin.save()
+
+        StaffProfile.objects.get_or_create(
+            user=root_admin,
+            defaults={
+                "department": "Executive Management",
+                "employee_id": "FT-ROOT-01",
+                "is_on_duty": True,
+            },
+        )
+        self.stdout.write(
+            self.style.SUCCESS("Permanent SuperAdmin created/updated: friendsturf171@gmail.com / friendsturf@12345")
+        )
+
         admin_user = User.objects.filter(email="admin@gmail.com").first()
         if not admin_user:
             admin_user = User.objects.create_superuser(
@@ -270,19 +300,20 @@ class Command(BaseCommand):
         turf_objs = []
         for t_data in turfs_data:
             fac_names = t_data.pop("facilities")
-            turf, created = Turf.objects.get_or_create(
-                slug=t_data["slug"], defaults=t_data
-            )
-            if not created:
-                for key, val in t_data.items():
-                    setattr(turf, key, val)
-                turf.save()
+            existing_turf = Turf.objects.filter(slug=t_data["slug"]).first()
+            if existing_turf:
+                # Preserve admin edits and do not overwrite or resurrect soft-deleted turfs
+                if not existing_turf.is_deleted:
+                    turf_objs.append(existing_turf)
+                continue
+
+            turf = Turf.objects.create(**t_data)
             for fn in fac_names:
                 if fn in facility_objs:
                     turf.facilities.add(facility_objs[fn])
             turf_objs.append(turf)
         self.stdout.write(
-            self.style.SUCCESS(f"Created/Updated {len(turf_objs)} Turfs with facilities")
+            self.style.SUCCESS(f"Loaded {len(turf_objs)} active Turfs without overwriting custom edits")
         )
 
         # 4. Membership Plans
@@ -451,98 +482,101 @@ class Command(BaseCommand):
 
         # 8. Create Realistic Demo Bookings
         # Booking 1: Upcoming Confirmed Booking for today evening with QR code
-        slot_today_1 = TimeSlot.objects.filter(
-            turf=turf_objs[0], date=today, start_time=time(19, 0)
-        ).first()
-        if slot_today_1 and slot_today_1.status != "BOOKED":
-            b1 = BookingEngine.create_booking(
-                turf=turf_objs[0],
-                date_obj=today,
-                slot_ids=[str(slot_today_1.id)],
-                user=customer_user,
-                payment_type="FULL",
-                payment_method="UPI",
-                notes="Friends 7v7 friendly match. Need size 5 football.",
-            )
-            self.stdout.write(
-                self.style.SUCCESS(
-                    f"Created Booking 1: {b1.booking_id} (CONFIRMED for Today 19:00)"
+        if len(turf_objs) > 0:
+            slot_today_1 = TimeSlot.objects.filter(
+                turf=turf_objs[0], date=today, start_time=time(19, 0)
+            ).first()
+            if slot_today_1 and slot_today_1.status != "BOOKED":
+                b1 = BookingEngine.create_booking(
+                    turf=turf_objs[0],
+                    date_obj=today,
+                    slot_ids=[str(slot_today_1.id)],
+                    user=customer_user,
+                    payment_type="FULL",
+                    payment_method="UPI",
+                    notes="Friends 7v7 friendly match. Need size 5 football.",
                 )
-            )
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"Created Booking 1: {b1.booking_id} (CONFIRMED for Today 19:00)"
+                    )
+                )
 
         # Booking 2: Checked-In Booking for Today (In Progress)
-        slot_today_2 = TimeSlot.objects.filter(
-            turf=turf_objs[1], date=today, start_time=time(17, 0)
-        ).first()
-        if slot_today_2 and slot_today_2.status != "BOOKED":
-            b2 = BookingEngine.create_booking(
-                turf=turf_objs[1],
-                date_obj=today,
-                slot_ids=[str(slot_today_2.id)],
-                user=customer_user,
-                payment_type="FULL",
-                payment_method="CARD",
-                notes="Office cricket tournament practice",
-            )
-            # Mark checked in
-            QRService.validate_and_checkin(
-                b2.booking_id, staff_user, "VIP Customer, fast pass"
-            )
-            self.stdout.write(
-                self.style.SUCCESS(f"Created Booking 2: {b2.booking_id} (CHECKED_IN)")
-            )
+        if len(turf_objs) > 1:
+            slot_today_2 = TimeSlot.objects.filter(
+                turf=turf_objs[1], date=today, start_time=time(17, 0)
+            ).first()
+            if slot_today_2 and slot_today_2.status != "BOOKED":
+                b2 = BookingEngine.create_booking(
+                    turf=turf_objs[1],
+                    date_obj=today,
+                    slot_ids=[str(slot_today_2.id)],
+                    user=customer_user,
+                    payment_type="FULL",
+                    payment_method="CARD",
+                    notes="Office cricket tournament practice",
+                )
+                # Mark checked in
+                QRService.validate_and_checkin(
+                    b2.booking_id, staff_user, "VIP Customer, fast pass"
+                )
+                self.stdout.write(
+                    self.style.SUCCESS(f"Created Booking 2: {b2.booking_id} (CHECKED_IN)")
+                )
 
         # Booking 3: Completed Booking from 2 days ago with Review
-        past_date = today - timedelta(days=2)
-        slot_past = TimeSlot.objects.filter(turf=turf_objs[0], date=past_date).first()
-        if not slot_past:
-            slot_past = TimeSlot.objects.create(
+        if len(turf_objs) > 0:
+            past_date = today - timedelta(days=2)
+            slot_past = TimeSlot.objects.filter(turf=turf_objs[0], date=past_date).first()
+            if not slot_past:
+                slot_past = TimeSlot.objects.create(
+                    turf=turf_objs[0],
+                    date=past_date,
+                    start_time=time(18, 0),
+                    end_time=time(19, 0),
+                    status="BOOKED",
+                    price=turf_objs[0].base_price,
+                )
+            b3 = Booking.objects.create(
+                booking_id=Booking.generate_booking_id(past_date),
+                customer=customer_user,
                 turf=turf_objs[0],
                 date=past_date,
                 start_time=time(18, 0),
                 end_time=time(19, 0),
-                status="BOOKED",
-                price=turf_objs[0].base_price,
+                status="COMPLETED",
+                total_amount=Decimal("1400.00"),
+                discount_amount=Decimal("140.00"),
+                tax_amount=Decimal("226.80"),
+                final_amount=Decimal("1486.80"),
+                amount_paid=Decimal("1486.80"),
+                balance_due=Decimal("0.00"),
+                checked_in_at=timezone.make_aware(datetime.combine(past_date, time(17, 55))),
+                completed_at=timezone.make_aware(datetime.combine(past_date, time(19, 5))),
             )
-        b3 = Booking.objects.create(
-            booking_id=Booking.generate_booking_id(past_date),
-            customer=customer_user,
-            turf=turf_objs[0],
-            date=past_date,
-            start_time=time(18, 0),
-            end_time=time(19, 0),
-            status="COMPLETED",
-            total_amount=Decimal("1400.00"),
-            discount_amount=Decimal("140.00"),
-            tax_amount=Decimal("226.80"),
-            final_amount=Decimal("1486.80"),
-            amount_paid=Decimal("1486.80"),
-            balance_due=Decimal("0.00"),
-            checked_in_at=timezone.make_aware(datetime.combine(past_date, time(17, 55))),
-            completed_at=timezone.make_aware(datetime.combine(past_date, time(19, 5))),
-        )
-        b3.slots.add(slot_past)
-        QRService.generate_qr_for_booking(b3)
+            b3.slots.add(slot_past)
+            QRService.generate_qr_for_booking(b3)
 
-        # Add Review for Booking 3
-        Review.objects.get_or_create(
-            booking=b3,
-            defaults={
-                "customer": customer_user,
-                "turf": turf_objs[0],
-                "rating": 5,
-                "facility_rating": 5,
-                "staff_rating": 5,
-                "review_text": "Exceptional pitch quality! The floodlights are bright and non-glaring. The staff welcomed our squad warmly.",
-                "suggestions": "Add chilled Gatorade in the dugout fridge!",
-                "admin_response": "Thank you Prajeeth! We have now stocked sports drinks at the counter.",
-            },
-        )
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Created Booking 3: {b3.booking_id} (COMPLETED with 5-star Review)"
+            # Add Review for Booking 3
+            Review.objects.get_or_create(
+                booking=b3,
+                defaults={
+                    "customer": customer_user,
+                    "turf": turf_objs[0],
+                    "rating": 5,
+                    "facility_rating": 5,
+                    "staff_rating": 5,
+                    "review_text": "Exceptional pitch quality! The floodlights are bright and non-glaring. The staff welcomed our squad warmly.",
+                    "suggestions": "Add chilled Gatorade in the dugout fridge!",
+                    "admin_response": "Thank you Prajeeth! We have now stocked sports drinks at the counter.",
+                },
             )
-        )
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Created Booking 3: {b3.booking_id} (COMPLETED with 5-star Review)"
+                )
+            )
 
         self.stdout.write(
             self.style.SUCCESS("All Friends Turf demo data successfully seeded!")

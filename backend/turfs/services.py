@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, date, time
 from decimal import Decimal
-from django.db import transaction
+from django.db import transaction, models
 from django.utils import timezone
 from .models import Turf, TimeSlot
 from pricing.engine import PricingEngine
@@ -54,6 +54,9 @@ class SchedulingEngine:
         - turf.operating_hours_end (default 23:00)
         - turf.slot_duration_minutes (default 60 mins)
         """
+        if getattr(turf, "is_deleted", False):
+            return []
+
         start_limit_dt = datetime.combine(date_obj, turf.operating_hours_start)
         if turf.operating_hours_end <= turf.operating_hours_start:
             end_limit_dt = datetime.combine(date_obj + timedelta(days=1), turf.operating_hours_end)
@@ -100,6 +103,62 @@ class SchedulingEngine:
         return list(
             TimeSlot.objects.filter(turf=turf, date=date_obj).order_by("start_time")
         )
+
+    @classmethod
+    def realign_future_slots(cls, turf, days_ahead=14):
+        """
+        Re-aligns future time slots when operating hours, slot duration, or base price are updated.
+        Preserves all confirmed customer bookings and active holds.
+        """
+        if getattr(turf, "is_deleted", False):
+            return
+
+        now_local = timezone.localtime(timezone.now())
+        today = now_local.date()
+        current_time = now_local.time()
+
+        start_time_limit = turf.operating_hours_start
+        end_time_limit = turf.operating_hours_end
+
+        with transaction.atomic():
+            for offset in range(days_ahead + 1):
+                target_date = today + timedelta(days=offset)
+                date_slots = TimeSlot.objects.filter(turf=turf, date=target_date)
+
+                # Check for booked or active locked slots on this day
+                booked_or_locked = date_slots.filter(
+                    models.Q(status="BOOKED")
+                    | models.Q(status="LOCKED", locked_until__gte=timezone.now())
+                )
+
+                if not booked_or_locked.exists():
+                    # No active bookings or locks: safely clear unbooked slots and re-generate
+                    if target_date == today:
+                        # For today, keep past slots, only replace future unbooked slots
+                        date_slots.filter(
+                            status="AVAILABLE",
+                            start_time__gt=current_time,
+                        ).delete()
+                        cls.generate_daily_slots(turf, target_date)
+                        date_slots.filter(status="AVAILABLE").update(price=turf.base_price)
+                    else:
+                        # Future date with 0 bookings: completely replace with new operating parameters
+                        date_slots.delete()
+                        cls.generate_daily_slots(turf, target_date)
+                else:
+                    # Active bookings exist: DO NOT delete booked slots
+                    # 1. Prune unbooked AVAILABLE slots that fall outside the new operating hours
+                    if end_time_limit > start_time_limit:
+                        date_slots.filter(
+                            status="AVAILABLE",
+                        ).filter(
+                            models.Q(start_time__lt=start_time_limit)
+                            | models.Q(end_time__gt=end_time_limit)
+                        ).delete()
+                    # 2. Update base_price on all remaining AVAILABLE slots
+                    date_slots.filter(status="AVAILABLE").update(price=turf.base_price)
+                    # 3. Fill in any missing slots within the new operating hours
+                    cls.generate_daily_slots(turf, target_date)
 
     @staticmethod
     def _serialize_slot_fast(

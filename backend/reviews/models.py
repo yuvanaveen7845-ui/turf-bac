@@ -11,7 +11,7 @@ class Review(models.Model):
     customer = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="reviews"
     )
-    turf = models.ForeignKey(Turf, on_delete=models.CASCADE, related_name="reviews")
+    turf = models.ForeignKey(Turf, on_delete=models.PROTECT, related_name="reviews")
 
     rating = models.IntegerField(default=5, help_text="Overall rating 1-5")
     facility_rating = models.IntegerField(

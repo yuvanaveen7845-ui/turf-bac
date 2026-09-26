@@ -15,6 +15,7 @@ from .serializers import FacilitySerializer, TurfSerializer, TimeSlotSerializer
 from accounts.permissions import IsAdmin, IsStaffOrAdmin
 from pricing.engine import PricingEngine
 from maintenance.models import Maintenance
+from .services import SchedulingEngine
 
 
 class TurfImageUploadView(views.APIView):
@@ -78,7 +79,7 @@ class TurfListView(views.APIView):
         return [IsAdmin()]
 
     def get(self, request):
-        turfs = Turf.objects.prefetch_related("facilities").all()
+        turfs = Turf.objects.filter(is_deleted=False).prefetch_related("facilities")
         sport = request.query_params.get("sport_type")
         if sport:
             turfs = turfs.filter(sport_type=sport.upper())
@@ -102,6 +103,8 @@ class TurfListView(views.APIView):
         serializer = TurfSerializer(data=request.data)
         if serializer.is_valid():
             turf = serializer.save()
+            # Pre-generate initial daily slots for the new arena
+            SchedulingEngine.realign_future_slots(turf, days_ahead=14)
             return Response(TurfSerializer(turf).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -113,35 +116,117 @@ class TurfDetailView(views.APIView):
         return [IsAdmin()]
 
     def get(self, request, pk):
-        turf = get_object_or_404(Turf, pk=pk)
+        turf = get_object_or_404(Turf, pk=pk, is_deleted=False)
         return Response(TurfSerializer(turf).data)
 
     def put(self, request, pk):
-        turf = get_object_or_404(Turf, pk=pk)
+        turf = get_object_or_404(Turf, pk=pk, is_deleted=False)
+        old_start = turf.operating_hours_start
+        old_end = turf.operating_hours_end
+        old_duration = turf.slot_duration_minutes
+        old_price = turf.base_price
+
         serializer = TurfSerializer(turf, data=request.data, partial=True)
         if serializer.is_valid():
             updated = serializer.save()
+
+            # If operating hours, slot duration, or base price changed, re-align future slots
+            schedule_changed = (
+                updated.operating_hours_start != old_start
+                or updated.operating_hours_end != old_end
+                or updated.slot_duration_minutes != old_duration
+                or updated.base_price != old_price
+            )
+            if schedule_changed:
+                SchedulingEngine.realign_future_slots(updated, days_ahead=14)
+
             return Response(TurfSerializer(updated).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, pk):
-        turf = get_object_or_404(Turf, pk=pk)
-        turf_name = turf.name
-        turf.delete()
-        return Response(
-            {"message": f"Turf '{turf_name}' deleted successfully."},
-            status=status.HTTP_200_OK,
+        turf = get_object_or_404(Turf, pk=pk, is_deleted=False)
+        from bookings.models import Booking
+        from django.db import transaction
+
+        now_dt = timezone.now()
+        today = timezone.localtime(now_dt).date()
+        is_hard_purge = (
+            request.query_params.get("purge") == "true"
+            or request.query_params.get("hard") == "true"
         )
 
+        with transaction.atomic():
+            turf_name = turf.name
 
-from .services import SchedulingEngine
+            if is_hard_purge:
+                # Permanent hard purge of this turf and its related records (useful for mock resets)
+                Booking.objects.filter(turf=turf).delete()
+                from reviews.models import Review
+                Review.objects.filter(turf=turf).delete()
+                turf.delete()
+                return Response(
+                    {"message": f"Turf '{turf_name}' and all associated records were permanently purged."},
+                    status=status.HTTP_200_OK,
+                )
+
+            # Auto-cancel any active or upcoming bookings so deletion is never blocked for admin
+            active_bookings = Booking.objects.filter(
+                turf=turf,
+                date__gte=today,
+                status__in=["CONFIRMED", "CHECKED_IN", "PAYMENT_PENDING"],
+            )
+            cancelled_count = active_bookings.count()
+            if cancelled_count > 0:
+                active_bookings.update(
+                    status="CANCELLED",
+                    cancel_reason=f"Arena '{turf_name}' was decommissioned and removed by administrator.",
+                    cancelled_at=now_dt,
+                )
+
+            # Evict all unbooked future time slots and release any held locks
+            TimeSlot.objects.filter(
+                turf=turf,
+                date__gte=today,
+                status__in=["AVAILABLE", "LOCKED"],
+            ).delete()
+
+            # Soft-delete the turf
+            turf.is_deleted = True
+            turf.is_active = False
+            turf.deleted_at = now_dt
+            turf.save(update_fields=["is_deleted", "is_active", "deleted_at"])
+
+        msg = f"Turf '{turf_name}' has been successfully deleted."
+        if cancelled_count > 0:
+            msg += f" ({cancelled_count} scheduled booking(s) were automatically cancelled)."
+
+        return Response(
+            {
+                "message": msg,
+                "cancelled_booking_count": cancelled_count,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class TurfAvailabilityView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, pk):
-        turf = get_object_or_404(Turf, pk=pk)
+        turf = get_object_or_404(Turf, pk=pk, is_deleted=False)
+        if not turf.is_active and not (
+            request.user
+            and request.user.is_authenticated
+            and (
+                getattr(request.user, "role", "") in ("ADMIN", "STAFF")
+                or request.user.is_superuser
+            )
+        ):
+            return Response(
+                {"error": f"Turf '{turf.name}' is currently closed."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
         date_str = request.query_params.get("date")
         if not date_str:
             date_obj = timezone.now().date()
@@ -177,7 +262,7 @@ class DailyScheduleView(views.APIView):
                 )
 
         sport = request.query_params.get("sport_type")
-        turfs_qs = Turf.objects.filter(is_active=True).prefetch_related("facilities")
+        turfs_qs = Turf.objects.filter(is_active=True, is_deleted=False).prefetch_related("facilities")
         if sport and sport.upper() != "ALL":
             turfs_qs = turfs_qs.filter(sport_type=sport.upper())
 

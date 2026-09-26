@@ -185,6 +185,7 @@ class UserSerializer(serializers.ModelSerializer):
     staff_profile = StaffProfileSerializer(read_only=True)
     full_name = serializers.ReadOnlyField()
     permissions = serializers.SerializerMethodField()
+    is_permanent = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -200,15 +201,19 @@ class UserSerializer(serializers.ModelSerializer):
             "role",
             "status",
             "permissions",
+            "is_permanent",
             "date_joined",
             "last_login_at",
             "customer_profile",
             "staff_profile",
         ]
-        read_only_fields = ["id", "google_id", "date_joined", "last_login_at", "role", "status", "permissions"]
+        read_only_fields = ["id", "google_id", "date_joined", "last_login_at", "role", "status", "permissions", "is_permanent"]
 
     def get_permissions(self, obj):
         return sorted(list(get_user_permissions(obj)))
+
+    def get_is_permanent(self, obj):
+        return getattr(obj, "is_permanent_admin", lambda: False)()
 
 
 class AdminCustomerCreateSerializer(serializers.Serializer):

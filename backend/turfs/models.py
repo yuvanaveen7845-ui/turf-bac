@@ -68,6 +68,8 @@ class Turf(models.Model):
     operating_hours_end = models.TimeField(default="23:00:00")
     slot_duration_minutes = models.IntegerField(default=60)
     is_active = models.BooleanField(default=True)
+    is_deleted = models.BooleanField(default=False, db_index=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
     rating = models.DecimalField(max_digits=3, decimal_places=2, default=5.00)
     total_reviews = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -76,10 +78,23 @@ class Turf(models.Model):
     class Meta:
         indexes = [
             models.Index(fields=["is_active", "sport_type"], name="turf_active_sport_idx"),
+            models.Index(fields=["is_deleted", "is_active"], name="turf_del_act_idx"),
         ]
 
     def __str__(self):
         return f"{self.name} - {self.location}"
+
+    def save(self, *args, **kwargs):
+        if not self.slug or self.slug.strip() == "":
+            from django.utils.text import slugify
+            base_slug = slugify(self.name) or "turf"
+            slug = base_slug
+            counter = 1
+            while Turf.objects.filter(slug=slug).exclude(pk=self.pk).exists():
+                slug = f"{base_slug}-{counter}"
+                counter += 1
+            self.slug = slug
+        super().save(*args, **kwargs)
 
 
 class TimeSlot(models.Model):

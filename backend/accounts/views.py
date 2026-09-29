@@ -964,30 +964,76 @@ class AdminCustomerDetailView(views.APIView):
         from payments.serializers import PaymentSerializer
         from reviews.models import Review
         from reviews.serializers import ReviewSerializer
+        from decimal import Decimal
 
         customer = generics.get_object_or_404(User, pk=pk, role="CUSTOMER")
         user_data = UserSerializer(customer).data
 
-        bookings = Booking.objects.filter(customer=customer).select_related("turf").order_by("-date", "-created_at")
-        payments = Payment.objects.filter(customer=customer).select_related("booking").order_by("-created_at")
+        # ── Live queries for detail sections ──────────────────────────────────
+        bookings = (
+            Booking.objects.filter(customer=customer)
+            .select_related("turf")
+            .order_by("-date", "-created_at")
+        )
+        payments = (
+            Payment.objects.filter(customer=customer)
+            .select_related("booking")
+            .order_by("-created_at")
+        )
         reviews = Review.objects.filter(customer=customer).select_related("turf").order_by("-created_at")
         notes = CustomerNote.objects.filter(customer=customer).select_related("author").order_by("-is_pinned", "-created_at")
 
-        total_bookings_count = bookings.count()
+        # ── Canonical summary metrics from CustomerProfile ────────────────────
+        # CustomerProfile.total_bookings / total_spending are the authoritative
+        # denormalized counters — the same source the customer list table reads.
+        # Using them here ensures the CRM modal and the table always agree.
+        try:
+            prof = customer.customer_profile
+            profile_total_bookings = int(prof.total_bookings or 0)
+            profile_total_spending = float(prof.total_spending or 0)
+            wallet_balance = float(prof.wallet_balance or 0)
+            cancellation_count = int(prof.cancellation_count or 0)
+            no_show_count = int(prof.no_show_count or 0)
+        except Exception:
+            prof = None
+            profile_total_bookings = 0
+            profile_total_spending = 0.0
+            wallet_balance = 0.0
+            cancellation_count = 0
+            no_show_count = 0
+
+        # Live booking-table counts (for sub-stats only; may differ from counter
+        # if a booking was hard-deleted or the counter drifted via seed data)
+        live_booking_count = bookings.count()
         completed_bookings_count = bookings.filter(status="COMPLETED").count()
         cancelled_bookings_count = bookings.filter(status="CANCELLED").count()
-        total_spent = sum(p.amount for p in payments.filter(status="PAID"))
+
+        # Use profile counter for the headline number; live count for sub-stats
+        repeat_rate = 0.0
+        if profile_total_bookings > 1:
+            repeat_rate = round((profile_total_bookings - 1) / profile_total_bookings * 100, 1)
+
+        serialized_bookings = BookingSerializer(bookings[:30], many=True).data
 
         return Response({
             "customer": user_data,
             "metrics": {
-                "total_bookings": total_bookings_count,
+                # Profile counters — consistent with the customer list table
+                "total_bookings": profile_total_bookings,
+                "total_spent": profile_total_spending,
+                "wallet_balance": wallet_balance,
+                "cancellation_count": cancellation_count,
+                "no_show_count": no_show_count,
+                "repeat_rate": repeat_rate,
+                # Live sub-stats from Booking table
                 "completed_bookings": completed_bookings_count,
                 "cancelled_bookings": cancelled_bookings_count,
-                "total_spent": float(total_spent),
-                "repeat_rate": round((total_bookings_count / 1.0) if total_bookings_count <= 1 else ((total_bookings_count - 1) / total_bookings_count * 100), 1),
+                "live_booking_count": live_booking_count,
             },
-            "bookings": BookingSerializer(bookings[:30], many=True).data,
+            # 'recent_bookings' key used by the admin frontend CRM modal
+            "recent_bookings": serialized_bookings[:10],
+            # 'bookings' kept for backward compatibility
+            "bookings": serialized_bookings,
             "payments": PaymentSerializer(payments[:30], many=True).data,
             "reviews": ReviewSerializer(reviews, many=True).data,
             "notes": CustomerNoteSerializer(notes, many=True).data,

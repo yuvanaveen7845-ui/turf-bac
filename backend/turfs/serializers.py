@@ -50,6 +50,20 @@ class TurfSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "rating", "total_reviews", "created_at", "updated_at"]
 
+    def validate_images(self, value):
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise serializers.ValidationError("Images must be provided as a list.")
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            if item.startswith("data:image") or len(item) > 2000:
+                raise serializers.ValidationError(
+                    "Raw base64 images cannot be saved directly into turf records. Please upload them as image files."
+                )
+        return value
+
 
 from django.utils import timezone
 

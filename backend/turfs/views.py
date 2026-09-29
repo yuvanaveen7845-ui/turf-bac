@@ -19,7 +19,7 @@ from .services import SchedulingEngine
 
 
 class TurfImageUploadView(views.APIView):
-    permission_classes = [IsAdmin]
+    permission_classes = [IsStaffOrAdmin]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def post(self, request):
@@ -27,30 +27,94 @@ class TurfImageUploadView(views.APIView):
         if not uploaded_files and "image" in request.FILES:
             uploaded_files = [request.FILES["image"]]
 
+        # Handle fallback base64 upload if explicitly sent via JSON
         if not uploaded_files:
             base64_data = request.data.get("image_base64")
             if base64_data:
                 import base64
-                fmt, imgstr = base64_data.split(";base64,") if ";base64," in base64_data else ("", base64_data)
-                ext = fmt.split("/")[-1] if fmt else "jpg"
-                filename = f"turfs/{uuid.uuid4().hex}.{ext}"
-                file_content = ContentFile(base64.b64decode(imgstr))
-                saved_path = default_storage.save(filename, file_content)
-                url = default_storage.url(saved_path)
-                return Response({"urls": [url], "url": url}, status=status.HTTP_201_CREATED)
+                import io
+                from PIL import Image, ImageOps
+
+                try:
+                    fmt, imgstr = base64_data.split(";base64,") if ";base64," in base64_data else ("", base64_data)
+                    raw_bytes = base64.b64decode(imgstr)
+                    img = Image.open(io.BytesIO(raw_bytes))
+                    img = ImageOps.exif_transpose(img)
+                    if img.width > 1920 or img.height > 1080:
+                        img.thumbnail((1920, 1080), Image.Resampling.LANCZOS)
+
+                    output = io.BytesIO()
+                    if img.mode in ("RGBA", "LA", "P"):
+                        img.save(output, format="WEBP", quality=82, method=6)
+                    else:
+                        img = img.convert("RGB")
+                        img.save(output, format="WEBP", quality=82, method=6)
+
+                    output.seek(0)
+                    filename = f"turfs/{uuid.uuid4().hex}.webp"
+                    saved_path = default_storage.save(filename, ContentFile(output.read()))
+                    url = default_storage.url(saved_path)
+                    abs_url = request.build_absolute_uri(url)
+                    return Response({"urls": [url], "url": url, "absolute_url": abs_url}, status=status.HTTP_201_CREATED)
+                except Exception as e:
+                    return Response({"error": f"Failed to process base64 image: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
             return Response({"error": "No image files provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        import io
+        from PIL import Image, ImageOps
+
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB limit
+        ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
         urls = []
         for file_obj in uploaded_files:
-            ext = os.path.splitext(file_obj.name)[1].lower()
-            if ext not in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"]:
-                ext = ".jpg"
-            filename = f"turfs/{uuid.uuid4().hex}{ext}"
-            saved_path = default_storage.save(filename, file_obj)
-            url = default_storage.url(saved_path)
-            urls.append(url)
+            if file_obj.size > MAX_FILE_SIZE:
+                return Response(
+                    {"error": f"File '{file_obj.name}' exceeds the maximum allowed size of 10MB."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        return Response({"urls": urls, "url": urls[0] if urls else ""}, status=status.HTTP_201_CREATED)
+            ext = os.path.splitext(file_obj.name)[1].lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                return Response(
+                    {"error": f"Unsupported file format '{ext}'. Please upload JPG, PNG, or WebP images."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            try:
+                # Open with Pillow and validate image integrity
+                img = Image.open(file_obj)
+
+                # Correct EXIF rotation (e.g. mobile photo orientations)
+                img = ImageOps.exif_transpose(img)
+
+                # Downscale high-resolution cameras to max 1920x1080
+                if img.width > 1920 or img.height > 1080:
+                    img.thumbnail((1920, 1080), Image.Resampling.LANCZOS)
+
+                # Convert to WebP for modern compression and fast loading
+                output = io.BytesIO()
+                if img.mode in ("RGBA", "LA", "P"):
+                    img.save(output, format="WEBP", quality=82, method=6)
+                else:
+                    img = img.convert("RGB")
+                    img.save(output, format="WEBP", quality=82, method=6)
+
+                output.seek(0)
+                filename = f"turfs/{uuid.uuid4().hex}.webp"
+                saved_path = default_storage.save(filename, ContentFile(output.read()))
+                url = default_storage.url(saved_path)
+                urls.append(url)
+            except Exception as e:
+                return Response(
+                    {"error": f"Failed to process '{file_obj.name}': {str(e)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        return Response({
+            "urls": urls,
+            "url": urls[0] if urls else "",
+        }, status=status.HTTP_201_CREATED)
 
 
 

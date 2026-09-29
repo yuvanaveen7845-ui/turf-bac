@@ -133,13 +133,35 @@ class CreateRazorpayOrderView(views.APIView):
 
             for slot in slots:
                 if slot.status == "BOOKED":
+                    # Check if this slot was already confirmed by the current user
+                    existing_booking = Booking.objects.filter(
+                        customer=request.user,
+                        slots=slot,
+                        status__in=["CONFIRMED", "CHECKED_IN", "IN_PROGRESS", "COMPLETED"],
+                    ).first()
+                    if existing_booking:
+                        return Response(
+                            {
+                                "error": f"Slot {slot.start_time.strftime('%I:%M %p')} is already confirmed on your Match Pass #{existing_booking.booking_id}.",
+                                "booking_id": existing_booking.booking_id,
+                                "is_already_booked_by_user": True,
+                                "code": "SLOT_ALREADY_CONFIRMED_FOR_USER",
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
                     return Response(
-                        {"error": f"Slot {slot.start_time.strftime('%H:%M')} is already booked."},
+                        {
+                            "error": f"Slot {slot.start_time.strftime('%I:%M %p')} has already been booked by another player.",
+                            "code": "SLOT_ALREADY_BOOKED",
+                        },
                         status=status.HTTP_409_CONFLICT,
                     )
                 if slot.status == "MAINTENANCE":
                     return Response(
-                        {"error": f"Slot {slot.start_time.strftime('%H:%M')} is under maintenance."},
+                        {
+                            "error": f"Slot {slot.start_time.strftime('%I:%M %p')} is under maintenance.",
+                            "code": "SLOT_UNDER_MAINTENANCE",
+                        },
                         status=status.HTTP_409_CONFLICT,
                     )
                 if (
@@ -148,7 +170,10 @@ class CreateRazorpayOrderView(views.APIView):
                     and slot.locked_by != request.user
                 ):
                     return Response(
-                        {"error": f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."},
+                        {
+                            "error": f"Slot {slot.start_time.strftime('%I:%M %p')} is currently held by another user.",
+                            "code": "SLOT_LOCKED_BY_OTHER",
+                        },
                         status=status.HTTP_409_CONFLICT,
                     )
 
@@ -465,11 +490,11 @@ class VerifyRazorpayPaymentView(views.APIView):
             data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
         )
 
-        # Dispatch branded Match Pass email via Django SMTP
+        # Dispatch branded Match Pass email asynchronously via background daemon thread
         try:
-            EmailNotificationService.send_booking_confirmation_email(booking)
+            EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
         except Exception as e:
-            pass
+            logger.warning(f"Async email dispatch failed in verify view: {e}")
 
         AuditLog.objects.create(
             user=booking.customer,
@@ -810,9 +835,9 @@ class RazorpayCallbackView(views.APIView):
                         pass
 
                     try:
-                        EmailNotificationService.send_booking_confirmation_email(booking)
-                    except Exception:
-                        pass
+                        EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
+                    except Exception as mail_err:
+                        logger.warning(f"Async email dispatch failed in callback view: {mail_err}")
 
                     return HttpResponseRedirect(f"{frontend_url}/confirmation/{booking.booking_id}")
 
@@ -1006,11 +1031,11 @@ class WalletBookingPaymentView(views.APIView):
             data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
         )
 
-        # Dispatch branded Match Pass email via Django SMTP
+        # Dispatch branded Match Pass email asynchronously via background daemon thread
         try:
-            EmailNotificationService.send_booking_confirmation_email(booking)
-        except Exception as e:
-            pass
+            EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
+        except Exception as mail_err:
+            logger.warning(f"Async email dispatch failed in wallet checkout view: {mail_err}")
 
         AuditLog.objects.create(
             user=request.user,
@@ -1069,74 +1094,88 @@ class RazorpayWebhookView(views.APIView):
         if existing_log:
             return Response({"status": "already_processed"}, status=status.HTTP_200_OK)
 
-        with transaction.atomic():
-            if event in ("payment.captured", "order.paid"):
-                payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
-                rzp_payment_id = payment_entity.get("id")
-                rzp_order_id = payment_entity.get("order_id")
-                amount = Decimal(str(payment_entity.get("amount", 0))) / Decimal("100.00")
+        booking_to_notify = None
 
-                payment = Payment.objects.select_for_update().filter(provider_order_id=rzp_order_id).first()
-                if payment and payment.status not in ("PAID", "SUCCESSFUL"):
-                    payment.status = "PAID"
-                    payment.provider_payment_id = rzp_payment_id
-                    payment.paid_at = timezone.now()
-                    payment.completed_at = timezone.now()
-                    payment.save()
+        try:
+            with transaction.atomic():
+                if event in ("payment.captured", "order.paid"):
+                    payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+                    rzp_payment_id = payment_entity.get("id")
+                    rzp_order_id = payment_entity.get("order_id")
+                    amount = Decimal(str(payment_entity.get("amount", 0))) / Decimal("100.00")
 
-                    if payment.booking:
-                        booking = Booking.objects.select_for_update().get(pk=payment.booking.pk)
-                        booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
-                        booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
-                        if booking.can_transition_to("CONFIRMED"):
-                            booking.transition_to("CONFIRMED")
-                        booking.save()
+                    payment = Payment.objects.select_for_update().filter(provider_order_id=rzp_order_id).first()
+                    if payment and payment.status not in ("PAID", "SUCCESSFUL"):
+                        payment.status = "PAID"
+                        payment.provider_payment_id = rzp_payment_id
+                        payment.paid_at = timezone.now()
+                        payment.completed_at = timezone.now()
+                        payment.save()
 
-                        for slot in booking.slots.all():
-                            slot.status = "BOOKED"
-                            slot.locked_until = None
-                            slot.locked_by = None
-                            slot.save()
+                        if payment.booking:
+                            booking = Booking.objects.select_for_update().get(pk=payment.booking.pk)
+                            booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
+                            booking.balance_due = max(Decimal("0.00"), booking.final_amount - booking.amount_paid)
+                            if booking.can_transition_to("CONFIRMED"):
+                                booking.transition_to("CONFIRMED")
+                            booking.save()
 
-                        QRService.generate_qr_for_booking(booking)
-                        try:
-                            EmailNotificationService.send_booking_confirmation_email(booking)
-                        except Exception as e:
-                            pass
-                    elif payment.customer:
-                        # Wallet top-up
-                        customer_profile = getattr(payment.customer, "customer_profile", None)
-                        if customer_profile:
-                            customer_profile.wallet_balance += amount
-                            customer_profile.save()
+                            for slot in booking.slots.all():
+                                slot.status = "BOOKED"
+                                slot.locked_until = None
+                                slot.locked_by = None
+                                slot.save()
 
-            elif event == "payment.failed":
-                payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
-                rzp_order_id = payment_entity.get("order_id")
-                payment = Payment.objects.select_for_update().filter(provider_order_id=rzp_order_id).first()
-                if payment and payment.status == "PENDING":
-                    payment.status = "FAILED"
-                    payment.failure_reason = payment_entity.get("error_description", "Payment failed via gateway")
-                    payment.save()
+                            try:
+                                QRService.generate_qr_for_booking(booking)
+                            except Exception as qr_err:
+                                logger.warning(f"Webhook QR generation warning: {qr_err}")
 
-            elif event == "refund.processed":
-                refund_entity = payload.get("payload", {}).get("refund", {}).get("entity", {})
-                rzp_refund_id = refund_entity.get("id")
-                refund = Refund.objects.filter(provider_refund_id=rzp_refund_id).first()
-                if refund and refund.status != "COMPLETED":
-                    refund.status = "COMPLETED"
-                    refund.completed_at = timezone.now()
-                    refund.save()
+                            booking_to_notify = booking.booking_id
+                        elif payment.customer:
+                            # Wallet top-up
+                            customer_profile = getattr(payment.customer, "customer_profile", None)
+                            if customer_profile:
+                                customer_profile.wallet_balance += amount
+                                customer_profile.save()
 
-            # Record idempotent audit entry
-            AuditLog.objects.create(
-                action="WEBHOOK_PROCESSED",
-                resource_type="WEBHOOK",
-                resource_id=event_id,
-                details={"event": event},
-            )
+                elif event == "payment.failed":
+                    payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+                    rzp_order_id = payment_entity.get("order_id")
+                    payment = Payment.objects.select_for_update().filter(provider_order_id=rzp_order_id).first()
+                    if payment and payment.status == "PENDING":
+                        payment.status = "FAILED"
+                        payment.failure_reason = payment_entity.get("error_description", "Payment failed via gateway")
+                        payment.save()
 
-        return Response({"status": "processed"}, status=status.HTTP_200_OK)
+                elif event == "refund.processed":
+                    refund_entity = payload.get("payload", {}).get("refund", {}).get("entity", {})
+                    rzp_refund_id = refund_entity.get("id")
+                    refund = Refund.objects.filter(provider_refund_id=rzp_refund_id).first()
+                    if refund and refund.status != "COMPLETED":
+                        refund.status = "COMPLETED"
+                        refund.completed_at = timezone.now()
+                        refund.save()
+
+                # Record idempotent audit entry
+                AuditLog.objects.create(
+                    action="WEBHOOK_PROCESSED",
+                    resource_type="WEBHOOK",
+                    resource_id=event_id,
+                    details={"event": event},
+                )
+
+            # Outside atomic transaction: dispatch email safely in background daemon thread
+            if booking_to_notify:
+                try:
+                    EmailNotificationService.send_booking_confirmation_email_async(booking_to_notify)
+                except Exception as mail_err:
+                    logger.warning(f"Could not queue async email for webhook {booking_to_notify}: {mail_err}")
+
+            return Response({"status": "processed"}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception("Error processing Razorpay webhook: %s", e)
+            return Response({"status": "error_acknowledged", "detail": str(e)}, status=status.HTTP_200_OK)
 
 
 class PaymentListCreateView(views.APIView):

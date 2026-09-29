@@ -292,7 +292,14 @@ class CancelBookingView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, identifier):
-        booking = get_object_or_404(Booking, booking_id=identifier)
+        booking = Booking.objects.filter(booking_id=identifier).first()
+        if not booking and str(identifier).isdigit():
+            booking = Booking.objects.filter(pk=int(identifier)).first()
+        if not booking:
+            return Response(
+                {"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+
         if request.user.role == "CUSTOMER" and booking.customer != request.user:
             return Response(
                 {"error": "Unauthorized."}, status=status.HTTP_403_FORBIDDEN
@@ -331,7 +338,14 @@ class RescheduleBookingView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, identifier):
-        booking = get_object_or_404(Booking, booking_id=identifier)
+        booking = Booking.objects.filter(booking_id=identifier).first()
+        if not booking and str(identifier).isdigit():
+            booking = Booking.objects.filter(pk=int(identifier)).first()
+        if not booking:
+            return Response(
+                {"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+
         if request.user.role == "CUSTOMER" and booking.customer != request.user:
             return Response(
                 {"error": "Unauthorized."}, status=status.HTTP_403_FORBIDDEN

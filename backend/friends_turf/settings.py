@@ -277,6 +277,7 @@ EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True").lower() in ("true", "1", "yes
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "False").lower() in ("true", "1", "yes")
 EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "").strip()
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "").strip()
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10").strip() or 10)
 
 # Authoritative default From email matching authenticated identity
 default_from = os.getenv("DEFAULT_FROM_EMAIL", "").strip()

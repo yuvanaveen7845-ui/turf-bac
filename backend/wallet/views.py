@@ -189,8 +189,9 @@ class WalletVerifyRazorpayPaymentView(views.APIView):
         payment.completed_at = now
         payment.save()
 
-        # Credit customer wallet
-        profile = getattr(request.user, "customer_profile", None)
+        # Credit customer wallet atomically with row lock
+        from accounts.models import CustomerProfile
+        profile = CustomerProfile.objects.select_for_update().filter(user=request.user).first()
         if not profile:
             return Response(
                 {"error": "Customer profile not found."},

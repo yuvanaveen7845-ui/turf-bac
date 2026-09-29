@@ -349,9 +349,9 @@ class BookingEngine:
 
             if b_status == "CONFIRMED":
                 try:
-                    EmailNotificationService.send_booking_confirmation_email(booking)
-                except Exception:
-                    pass
+                    EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
+                except Exception as mail_err:
+                    logger.warning(f"Async email dispatch warning in create_booking: {mail_err}")
 
             AuditLog.objects.create(
                 user=user,

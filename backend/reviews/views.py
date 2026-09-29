@@ -28,6 +28,13 @@ class ReviewListCreateView(views.APIView):
         if not is_admin:
             reviews = reviews.filter(is_hidden=False)
 
+        min_rating = request.query_params.get("min_rating")
+        if min_rating:
+            try:
+                reviews = reviews.filter(rating__gte=int(min_rating))
+            except (ValueError, TypeError):
+                pass
+
         serializer = ReviewSerializer(reviews, many=True)
         return Response(serializer.data)
 

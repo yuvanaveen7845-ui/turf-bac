@@ -314,7 +314,7 @@ def render_payment_receipt_email(receipt_data: dict) -> str:
           <td align="right" style="font-size: 13px; font-weight: 700; color: #0F172A;">₹{base_amount:,.2f}</td>
         </tr>
         <tr style="border-bottom: 1px solid #E2E8F0;">
-          <td style="font-size: 12px; color: #64748B;">GST (18% - SAC 999651)</td>
+          <td style="font-size: 12px; color: #64748B;">Statutory GST (18% - SAC 999651 Included)</td>
           <td align="right" style="font-size: 13px; font-weight: 700; color: #0F172A;">₹{tax_amount:,.2f}</td>
         </tr>
         <tr>

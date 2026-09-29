@@ -172,6 +172,11 @@ class BusinessSettingsHelper:
         return Decimal(str(val))
 
     @classmethod
+    def is_tax_included(cls) -> bool:
+        payments = cls.get_payment_settings()
+        return bool(payments.get("isTaxIncluded", True))
+
+    @classmethod
     def get_slot_lock_duration_minutes(cls) -> int:
         booking = cls.get_booking_rules()
         return int(booking.get("slotHoldMinutes", 5))

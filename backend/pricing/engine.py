@@ -304,14 +304,31 @@ class PricingEngine:
                 })
 
         total_discount = membership_discount + coupon_discount + admin_discount
-        taxable_amount = max(Decimal("0.00"), subtotal - total_discount)
-        
+        discounted_total = max(Decimal("0.00"), subtotal - total_discount)
+
         # Dynamic tax rate percentage from BusinessSetting
         tax_rate = cls.get_tax_rate_percentage()
-        tax_amount = round(
-            (taxable_amount * tax_rate) / Decimal("100.00"), 2
-        )
-        calculated_final = taxable_amount + tax_amount
+        is_tax_included = BusinessSettingsHelper.is_tax_included()
+
+        if is_tax_included:
+            # Slot prices are GST-inclusive (no additional GST added on top).
+            # If a slot is priced at ₹1000, final payable amount is ₹1000.
+            # Included statutory GST = total * (tax_rate / (100 + tax_rate))
+            calculated_final = discounted_total
+            if tax_rate > Decimal("0.00") and calculated_final > Decimal("0.00"):
+                tax_amount = round(
+                    (calculated_final * tax_rate) / (Decimal("100.00") + tax_rate), 2
+                )
+                taxable_amount = calculated_final - tax_amount
+            else:
+                tax_amount = Decimal("0.00")
+                taxable_amount = calculated_final
+        else:
+            taxable_amount = discounted_total
+            tax_amount = round(
+                (taxable_amount * tax_rate) / Decimal("100.00"), 2
+            )
+            calculated_final = taxable_amount + tax_amount
 
         # Manual Price Override
         is_overridden = False
@@ -325,6 +342,11 @@ class PricingEngine:
                     raise ValueError("Staff are not authorized to override booking pricing.")
             final_amount = max(Decimal("0.00"), override_val)
             is_overridden = True
+            if is_tax_included and tax_rate > Decimal("0.00") and final_amount > Decimal("0.00"):
+                tax_amount = round(
+                    (final_amount * tax_rate) / (Decimal("100.00") + tax_rate), 2
+                )
+                taxable_amount = final_amount - tax_amount
 
         return {
             "total_base": float(total_base),
@@ -339,6 +361,7 @@ class PricingEngine:
             "taxable_amount": float(taxable_amount),
             "tax_rate_percent": float(tax_rate),
             "tax_amount": float(tax_amount),
+            "is_tax_included": is_tax_included,
             "final_amount": float(final_amount),
             "original_standard_total": original_standard_total,
             "is_price_overridden": is_overridden,

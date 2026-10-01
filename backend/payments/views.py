@@ -759,8 +759,16 @@ class RazorpayCallbackView(views.APIView):
         razorpay_signature = data.get("razorpay_signature")
         error_code = data.get("error[code]") or data.get("error_code")
         error_description = data.get("error[description]") or data.get("error_description")
-
-        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:5173").rstrip("/")
+        # Strict origin validation to guarantee customer is only redirected to our trusted website
+        frontend_url = getattr(settings, "FRONTEND_URL", "https://friendsturf.in").rstrip("/")
+        req_origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
+        trusted_domains = ["https://friendsturf.in", "https://www.friendsturf.in", "https://turf-fron.pages.dev"]
+        if getattr(settings, "DEBUG", False):
+            trusted_domains.extend(["http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173", "http://127.0.0.1:5174"])
+        for td in trusted_domains:
+            if req_origin.startswith(td):
+                frontend_url = td
+                break
 
         if error_code or not razorpay_payment_id or not razorpay_order_id:
             # Fallback redirect to frontend callback handler or my-bookings

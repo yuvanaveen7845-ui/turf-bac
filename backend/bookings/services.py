@@ -102,12 +102,12 @@ class BookingEngine:
                         f"Slot {slot.start_time.strftime('%H:%M')} is temporarily held by another customer.",
                     )
 
-            # Apply 5-minute temporary lock
+            # Apply 5-minute temporary lock — single bulk UPDATE instead of N individual saves
             for slot in slots:
                 slot.status = "LOCKED"
                 slot.locked_until = lock_until
                 slot.locked_by = user
-                slot.save()
+            TimeSlot.objects.bulk_update(slots, ["status", "locked_until", "locked_by"])
 
         return True, {
             "locked_until": lock_until.isoformat(),
@@ -290,14 +290,16 @@ class BookingEngine:
                 notes=notes,
             )
 
-            # Mark slots as BOOKED and clear locks
+            # Mark slots as BOOKED and clear locks — single bulk UPDATE + batch M2M add
             for slot in slots:
                 slot.status = "BOOKED"
                 slot.booking_id = booking.booking_id
                 slot.locked_until = None
                 slot.locked_by = None
-                slot.save()
-                booking.slots.add(slot)
+            TimeSlot.objects.bulk_update(
+                slots, ["status", "booking_id", "locked_until", "locked_by"]
+            )
+            booking.slots.add(*slots)
 
             # Record coupon usage if applied
             if coupon:
@@ -381,13 +383,17 @@ class BookingEngine:
             booking.cancel_reason = reason
             booking.save()
 
-            # Release slots
-            for slot in booking.slots.select_for_update():
+            # Release slots — single bulk UPDATE instead of N individual saves
+            cancel_slots = list(booking.slots.select_for_update())
+            for slot in cancel_slots:
                 slot.status = "AVAILABLE"
                 slot.booking_id = ""
                 slot.locked_until = None
                 slot.locked_by = None
-                slot.save()
+            if cancel_slots:
+                TimeSlot.objects.bulk_update(
+                    cancel_slots, ["status", "booking_id", "locked_until", "locked_by"]
+                )
 
             # Process dynamic refund to customer wallet based on cancellation policy lead time
             cancellation_calc = CancellationPolicyEngine.calculate_refund(booking)
@@ -523,13 +529,17 @@ class BookingEngine:
                         f"Slot {slot.start_time.strftime('%H:%M')} is under maintenance."
                     )
 
-            # Release old slots
-            for old_slot in booking.slots.select_for_update():
+            # Release old slots — single bulk UPDATE
+            old_slots = list(booking.slots.select_for_update())
+            for old_slot in old_slots:
                 old_slot.status = "AVAILABLE"
                 old_slot.booking_id = ""
                 old_slot.locked_until = None
                 old_slot.locked_by = None
-                old_slot.save()
+            if old_slots:
+                TimeSlot.objects.bulk_update(
+                    old_slots, ["status", "booking_id", "locked_until", "locked_by"]
+                )
 
             # Calculate price for new schedule
             slot_items = [{"start_time": s.start_time, "end_time": s.end_time} for s in new_slots]
@@ -563,13 +573,13 @@ class BookingEngine:
                     )
                     booking.amount_paid = new_final_amt
 
-            # Re-link slots
+            # Re-link slots — single bulk UPDATE + batch M2M add
             booking.slots.clear()
             for slot in new_slots:
                 slot.status = "BOOKED"
                 slot.booking_id = booking.booking_id
-                slot.save()
-                booking.slots.add(slot)
+            TimeSlot.objects.bulk_update(new_slots, ["status", "booking_id"])
+            booking.slots.add(*new_slots)
 
             booking.date = new_date
             booking.start_time = new_slots[0].start_time
@@ -649,12 +659,16 @@ class BookingEngine:
                 booking.transition_to("CONFIRMED")
             booking.save()
 
-            # Ensure all slots are permanently BOOKED
-            for slot in booking.slots.all():
+            # Ensure all slots are permanently BOOKED — single bulk UPDATE
+            payment_slots = list(booking.slots.all())
+            for slot in payment_slots:
                 slot.status = "BOOKED"
                 slot.locked_until = None
                 slot.locked_by = None
-                slot.save()
+            if payment_slots:
+                TimeSlot.objects.bulk_update(
+                    payment_slots, ["status", "locked_until", "locked_by"]
+                )
 
             # Generate/Refresh QR Ticket
             QRService.generate_qr_for_booking(booking)

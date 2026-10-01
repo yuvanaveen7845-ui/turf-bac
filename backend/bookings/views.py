@@ -269,10 +269,20 @@ class BookingDetailView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, identifier):
-        # Allow lookup by id or booking_id
-        booking = Booking.objects.filter(booking_id=identifier).first()
+        # Allow lookup by id or booking_id — with eager loading to prevent N+1
+        booking = (
+            Booking.objects.select_related("turf", "customer")
+            .prefetch_related("slots", "refunds")
+            .filter(booking_id=identifier)
+            .first()
+        )
         if not booking:
-            booking = Booking.objects.filter(pk=identifier).first()
+            booking = (
+                Booking.objects.select_related("turf", "customer")
+                .prefetch_related("slots", "refunds")
+                .filter(pk=identifier)
+                .first()
+            )
         if not booking:
             return Response(
                 {"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND
@@ -292,9 +302,19 @@ class CancelBookingView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, identifier):
-        booking = Booking.objects.filter(booking_id=identifier).first()
+        booking = (
+            Booking.objects.select_related("turf", "customer")
+            .prefetch_related("slots")
+            .filter(booking_id=identifier)
+            .first()
+        )
         if not booking and str(identifier).isdigit():
-            booking = Booking.objects.filter(pk=int(identifier)).first()
+            booking = (
+                Booking.objects.select_related("turf", "customer")
+                .prefetch_related("slots")
+                .filter(pk=int(identifier))
+                .first()
+            )
         if not booking:
             return Response(
                 {"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND
@@ -338,9 +358,19 @@ class RescheduleBookingView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, identifier):
-        booking = Booking.objects.filter(booking_id=identifier).first()
+        booking = (
+            Booking.objects.select_related("turf", "customer")
+            .prefetch_related("slots")
+            .filter(booking_id=identifier)
+            .first()
+        )
         if not booking and str(identifier).isdigit():
-            booking = Booking.objects.filter(pk=int(identifier)).first()
+            booking = (
+                Booking.objects.select_related("turf", "customer")
+                .prefetch_related("slots")
+                .filter(pk=int(identifier))
+                .first()
+            )
         if not booking:
             return Response(
                 {"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND
@@ -373,7 +403,12 @@ class StaffTodayBookingsView(views.APIView):
 
     def get(self, request):
         today = timezone.now().date()
-        bookings = Booking.objects.filter(date=today).order_by("start_time")
+        bookings = (
+            Booking.objects.filter(date=today)
+            .select_related("turf", "customer")
+            .prefetch_related("slots", "refunds")
+            .order_by("start_time")
+        )
         return Response(BookingSerializer(bookings, many=True).data)
 
 
@@ -560,9 +595,18 @@ class RecordOfflinePaymentView(views.APIView):
     permission_classes = [IsStaffOrAdmin]
 
     def post(self, request, identifier):
-        booking = Booking.objects.filter(booking_id=identifier).first()
+        booking = (
+            Booking.objects.select_related("turf", "customer")
+            .prefetch_related("slots", "refunds")
+            .filter(booking_id=identifier)
+            .first()
+        )
         if not booking:
-            booking = get_object_or_404(Booking, pk=identifier)
+            booking = get_object_or_404(
+                Booking.objects.select_related("turf", "customer")
+                .prefetch_related("slots", "refunds"),
+                pk=identifier,
+            )
 
         amount = request.data.get("amount")
         payment_method = request.data.get("payment_method", "CASH").upper()

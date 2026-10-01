@@ -21,8 +21,15 @@ class BookingSerializer(serializers.ModelSerializer):
     refundable_amount = serializers.SerializerMethodField()
 
     def get_already_refunded(self, obj):
-        from django.db.models import Sum
         from decimal import Decimal
+        # Use prefetched refunds cache when available to avoid N+1 aggregation queries
+        if hasattr(obj, '_prefetched_objects_cache') and 'refunds' in obj._prefetched_objects_cache:
+            total = sum(
+                r.amount for r in obj._prefetched_objects_cache['refunds']
+                if r.status in ("COMPLETED", "PROCESSING")
+            )
+            return float(total or Decimal("0.00"))
+        from django.db.models import Sum
         total = obj.refunds.filter(status__in=["COMPLETED", "PROCESSING"]).aggregate(Sum("amount"))["amount__sum"] or Decimal("0.00")
         return float(total)
 
@@ -32,7 +39,12 @@ class BookingSerializer(serializers.ModelSerializer):
         return max(0.0, round(paid - refunded, 2))
 
     def get_qr_ticket_data(self, obj):
-        cred = getattr(obj, "qr_credential", None)
+        # Use prefetch/select_related cache first, then fallback to getattr reverse lookup
+        cred = None
+        try:
+            cred = obj.qr_credential
+        except Exception:
+            pass
         if not cred and obj.status in ["CONFIRMED", "UPCOMING", "CHECKED_IN"]:
             cred = QRService.generate_credential_for_booking(obj)
         if not cred:

@@ -273,18 +273,20 @@ class GoogleAuthSerializer(serializers.Serializer):
 
 class B2BUserCreateSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    first_name = serializers.CharField(max_length=100)
-    last_name = serializers.CharField(max_length=100, required=False, allow_blank=True)
-    phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
+    first_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
+    last_name = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
+    phone = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
     role = serializers.ChoiceField(choices=["STAFF", "ADMIN"], default="STAFF")
     status = serializers.ChoiceField(choices=["ACTIVE", "INVITED"], default="INVITED")
-    department = serializers.CharField(max_length=100, required=False, default="Turf Operations")
-    employee_id = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    department = serializers.CharField(max_length=100, required=False, allow_blank=True, default="Turf Operations")
+    employee_id = serializers.CharField(max_length=50, required=False, allow_blank=True, default="")
 
     def validate_email(self, value):
-        if User.objects.filter(email__iexact=value).exists():
-            raise serializers.ValidationError("A user with this email already exists.")
-        return value.lower()
+        cleaned = value.strip().lower()
+        existing = User.objects.filter(email__iexact=cleaned).first()
+        if existing and existing.role in ["STAFF", "ADMIN"]:
+            raise serializers.ValidationError("A team member with this email already exists.")
+        return cleaned
 
 
 class B2BUserUpdateSerializer(serializers.Serializer):

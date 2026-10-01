@@ -352,3 +352,40 @@ class PermanentAdminProtectionTests(TestCase):
         self.assertEqual(res2.status_code, status.HTTP_200_OK)
         self.assertFalse(User.objects.filter(id=self.regular_staff.id).exists())
 
+    def test_b2b_user_invite_with_minimal_fields(self):
+        self.client.force_authenticate(user=self.regular_admin)
+        res = self.client.post(
+            "/api/auth/b2b-users/",
+            {"email": "newbie.staff@friendsturf.in", "first_name": "", "department": ""},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(email="newbie.staff@friendsturf.in")
+        self.assertEqual(user.role, "STAFF")
+        self.assertEqual(user.first_name, "Newbie.staff")
+        self.assertEqual(user.staff_profile.department, "Turf Operations")
+
+    def test_b2b_user_invite_promotes_existing_customer(self):
+        self.client.force_authenticate(user=self.regular_admin)
+        customer = User.objects.create_user(
+            email="existing.customer@friendsturf.in",
+            role="CUSTOMER",
+            first_name="Customer",
+            last_name="One",
+        )
+        res = self.client.post(
+            "/api/auth/b2b-users/",
+            {"email": "existing.customer@friendsturf.in", "role": "STAFF"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        customer.refresh_from_db()
+        self.assertEqual(customer.role, "STAFF")
+        self.assertTrue(hasattr(customer, "staff_profile"))
+
+    def test_safe_media_serve_missing_file_returns_200_svg(self):
+        res = self.client.get("/media/turfs/non_existent_image_12345.jpeg")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res["Content-Type"], "image/svg+xml")
+        self.assertIn("<svg", res.content.decode("utf-8"))
+

@@ -93,6 +93,15 @@ class Payment(models.Model):
             models.Index(fields=["created_at", "status"], name="payment_created_stat_idx"),
             models.Index(fields=["booking", "status"], name="payment_bk_stat_idx"),
             models.Index(fields=["customer", "status"], name="payment_cust_stat_idx"),
+            # Covering indexes for report aggregation queries (cash drawer, daily revenue)
+            models.Index(
+                fields=["payment_method", "status", "created_at"],
+                name="payment_method_stat_dt_idx",
+            ),
+            models.Index(
+                fields=["status", "paid_at"],
+                name="payment_stat_paid_idx",
+            ),
         ]
 
     def __str__(self):

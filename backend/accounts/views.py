@@ -746,30 +746,53 @@ class AdminB2BUserListView(views.APIView):
         serializer = B2BUserCreateSerializer(data=request.data)
         if serializer.is_valid():
             data = serializer.validated_data
-            # Create user without password (will authenticate via Google OAuth)
-            user = User.objects.create_user(
-                email=data["email"],
-                password=None,
-                first_name=data.get("first_name", ""),
-                last_name=data.get("last_name", ""),
-                phone=data.get("phone", ""),
-                role=data.get("role", "STAFF"),
-                status=data.get("status", "INVITED"),
-            )
+            email = data["email"]
+            first_name = data.get("first_name", "").strip()
+            if not first_name:
+                first_name = email.split("@")[0].capitalize()
+            last_name = data.get("last_name", "").strip()
+            phone = data.get("phone", "").strip()
+            role = data.get("role", "STAFF")
+            b2b_status = data.get("status", "INVITED")
+            department = data.get("department", "").strip() or "Turf Operations"
+            employee_id = data.get("employee_id", "").strip()
+
+            existing_user = User.objects.filter(email__iexact=email).first()
+            if existing_user:
+                existing_user.role = role
+                existing_user.status = b2b_status
+                if first_name and not existing_user.first_name:
+                    existing_user.first_name = first_name
+                if last_name and not existing_user.last_name:
+                    existing_user.last_name = last_name
+                if phone and not existing_user.phone:
+                    existing_user.phone = phone
+                existing_user.save()
+                user = existing_user
+            else:
+                user = User.objects.create_user(
+                    email=email,
+                    password=None,
+                    first_name=first_name,
+                    last_name=last_name,
+                    phone=phone,
+                    role=role,
+                    status=b2b_status,
+                )
 
             # Update staff profile details
-            if hasattr(user, "staff_profile"):
-                staff_prof = user.staff_profile
-                staff_prof.employee_id = data.get("employee_id", "")
-                staff_prof.department = data.get("department", "Turf Operations")
-                staff_prof.save()
+            staff_prof, _ = StaffProfile.objects.get_or_create(user=user)
+            if employee_id:
+                staff_prof.employee_id = employee_id
+            staff_prof.department = department
+            staff_prof.save()
 
             AuditLog.objects.create(
                 user=request.user,
                 action="B2B_USER_INVITED",
                 resource_type="USER",
                 resource_id=user.email,
-                details={"role": user.role, "status": user.status, "department": data.get("department", "")},
+                details={"role": user.role, "status": user.status, "department": department},
             )
 
             return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)

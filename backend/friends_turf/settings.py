@@ -55,6 +55,8 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    # Performance monitoring — no-op in production (DEBUG=False)
+    "friends_turf.middleware.QueryCountMiddleware",
 ]
 
 ROOT_URLCONF = "friends_turf.urls"
@@ -110,6 +112,12 @@ elif os.environ.get("DB_ENGINE") in ("postgres", "postgresql") or os.environ.get
             "PORT": os.environ.get("DB_PORT", "5432"),
             "CONN_MAX_AGE": 600,
             "CONN_HEALTH_CHECKS": True,
+            "OPTIONS": {
+                # PostgreSQL performance tuning:
+                # - statement_timeout: Safety net for runaway queries (30 seconds)
+                # - application_name: Identify this app in pg_stat_activity for pool debugging
+                "options": "-c statement_timeout=30000 -c application_name=friends_turf",
+            },
         }
     }
 else:
@@ -118,7 +126,17 @@ else:
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": BASE_DIR / "db.sqlite3",
             "OPTIONS": {
-                "timeout": 20,
+                "timeout": 30,
+                "init_command": (
+                    "PRAGMA journal_mode = WAL;"
+                    "PRAGMA synchronous = NORMAL;"
+                    "PRAGMA cache_size = -64000;"
+                    "PRAGMA temp_store = MEMORY;"
+                    "PRAGMA mmap_size = 268435456;"
+                    "PRAGMA busy_timeout = 5000;"
+                    "PRAGMA page_size = 4096;"
+                    "PRAGMA foreign_keys = ON;"
+                ),
             },
         }
     }
@@ -136,6 +154,10 @@ def configure_sqlite_performance(sender, connection, **kwargs):
             cursor.execute("PRAGMA cache_size = -64000;")
             cursor.execute("PRAGMA temp_store = MEMORY;")
             cursor.execute("PRAGMA mmap_size = 268435456;")
+            cursor.execute("PRAGMA busy_timeout = 5000;")
+            cursor.execute("PRAGMA page_size = 4096;")
+            cursor.execute("PRAGMA foreign_keys = ON;")
+            cursor.execute("PRAGMA wal_autocheckpoint = 1000;")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 SILENCED_SYSTEM_CHECKS = []
@@ -148,6 +170,9 @@ CACHES = {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         "LOCATION": "friends-turf-cache",
         "TIMEOUT": 300,  # 5 minutes default TTL
+        "OPTIONS": {
+            "MAX_ENTRIES": 1000,  # Prevent unbounded cache growth
+        },
     }
 }
 
@@ -233,6 +258,9 @@ if csrf_origins_env:
     CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(DEFAULT_CSRF_TRUSTED_ORIGINS + env_csrf))
 else:
     CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_TRUSTED_ORIGINS
+
+# Authoritative Frontend Domain for strict post-payment redirects
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://friendsturf.in").rstrip("/")
 
 # Production Security Configurations
 SECURE_CROSS_ORIGIN_OPENER_POLICY = os.getenv("SECURE_CROSS_ORIGIN_OPENER_POLICY", "same-origin-allow-popups")
@@ -329,3 +357,11 @@ LOGGING = {
     },
 }
 
+# DEBUG-only: Log slow queries (>100ms) to console for bottleneck identification.
+# Enable with DB_LOG_QUERIES=true in .env for targeted profiling.
+if DEBUG and os.getenv("DB_LOG_QUERIES", "false").lower() in ("true", "1", "yes"):
+    LOGGING["loggers"]["django.db.backends"] = {
+        "handlers": ["console"],
+        "level": "DEBUG",
+        "propagate": False,
+    }

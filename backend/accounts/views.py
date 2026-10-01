@@ -657,7 +657,8 @@ class CurrentUserView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        serializer = UserSerializer(request.user)
+        user = User.objects.select_related("customer_profile", "staff_profile").filter(pk=request.user.pk).first() or request.user
+        serializer = UserSerializer(user)
         return Response(serializer.data)
 
     def put(self, request):

@@ -318,6 +318,99 @@ class PasswordResetOTP(models.Model):
         return instance, raw_code
 
 
+class LoginOTP(models.Model):
+    """
+    Cryptographic OTP model for Passwordless Mobile & Email Login.
+    Stores SHA-256 hashed 6-digit OTP code, attempt counter, and session tracking.
+    """
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, null=True, blank=True, related_name="login_otps"
+    )
+    identifier = models.CharField(max_length=255, db_index=True)
+    channel = models.CharField(
+        max_length=10,
+        choices=(("SMS", "SMS"), ("EMAIL", "EMAIL")),
+        default="SMS",
+    )
+    otp_hash = models.CharField(max_length=64, db_index=True)
+    session_token = models.CharField(
+        max_length=64, blank=True, unique=True, null=True, db_index=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+    attempts = models.IntegerField(default=0)
+    max_attempts = models.IntegerField(default=5)
+    is_verified = models.BooleanField(default=False)
+    is_used = models.BooleanField(default=False)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["identifier", "is_verified", "is_used", "expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"LoginOTP for {self.identifier} via {self.channel} [{self.is_verified=}, {self.is_used=}]"
+
+    @staticmethod
+    def hash_otp(otp_code: str) -> str:
+        """Computes SHA-256 cryptographic hash of numeric OTP."""
+        return hashlib.sha256(str(otp_code).strip().encode("utf-8")).hexdigest()
+
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
+
+    def is_locked(self) -> bool:
+        return self.attempts >= self.max_attempts
+
+    def verify_code(self, candidate_otp: str) -> bool:
+        """Verifies candidate 6-digit OTP against stored SHA-256 hash."""
+        if self.is_used or self.is_verified or self.is_expired() or self.is_locked():
+            return False
+        self.attempts += 1
+        candidate_hash = self.hash_otp(candidate_otp)
+        if candidate_hash == self.otp_hash:
+            self.is_verified = True
+            self.session_token = uuid.uuid4().hex + uuid.uuid4().hex[:16]
+            self.save(update_fields=["attempts", "is_verified", "session_token"])
+            return True
+        self.save(update_fields=["attempts"])
+        return False
+
+    @classmethod
+    def generate_otp_for_identifier(
+        cls, identifier: str, channel: str = "SMS", user=None, validity_minutes=10, ip_address=None, user_agent=""
+    ):
+        """
+        Invalidates existing unverified OTPs for identifier and generates a fresh 6-digit numeric OTP.
+        Returns a tuple: (otp_instance, raw_6_digit_otp_string).
+        """
+        # Invalidate existing active OTPs
+        cls.objects.filter(identifier=identifier, is_used=False).update(is_used=True)
+
+        raw_code = f"{secrets.randbelow(900000) + 100000}"
+        otp_hash = cls.hash_otp(raw_code)
+        expires_at = timezone.now() + timezone.timedelta(minutes=validity_minutes)
+
+        clean_ip = None
+        if ip_address:
+            first_ip = str(ip_address).split(",")[0].strip()
+            if first_ip and len(first_ip) <= 45:
+                clean_ip = first_ip
+
+        instance = cls.objects.create(
+            user=user,
+            identifier=identifier,
+            channel=channel,
+            otp_hash=otp_hash,
+            expires_at=expires_at,
+            ip_address=clean_ip,
+            user_agent=str(user_agent or "")[:500],
+        )
+        return instance, raw_code
+
 
 class CustomerNote(models.Model):
     customer = models.ForeignKey(

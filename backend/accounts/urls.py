@@ -18,10 +18,14 @@ from .views import (
     RequestPasswordResetOTPView,
     VerifyPasswordResetOTPView,
     ConfirmPasswordResetView,
+    RequestLoginOTPView,
+    VerifyLoginOTPView,
 )
 
 urlpatterns = [
     path("check-availability/", CheckUserAvailabilityView.as_view(), name="check_user_availability"),
+    path("login/request-otp/", RequestLoginOTPView.as_view(), name="request_login_otp"),
+    path("login/verify-otp/", VerifyLoginOTPView.as_view(), name="verify_login_otp"),
     path("password-reset/request-otp/", RequestPasswordResetOTPView.as_view(), name="request_password_reset_otp"),
     path("password-reset/verify-otp/", VerifyPasswordResetOTPView.as_view(), name="verify_password_reset_otp"),
     path("password-reset/confirm/", ConfirmPasswordResetView.as_view(), name="confirm_password_reset"),

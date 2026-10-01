@@ -11,9 +11,10 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
-from .models import User, CustomerProfile, StaffProfile, PasswordResetToken, PasswordResetOTP
+from django.db.models import Q
+from .models import User, CustomerProfile, StaffProfile, PasswordResetToken, PasswordResetOTP, LoginOTP
 from .lookup_service import user_lookup_engine
-from notifications.services import EmailNotificationService
+from notifications.services import EmailNotificationService, SMSNotificationService
 from .serializers import (
     UserSerializer,
     RegisterSerializer,
@@ -27,6 +28,8 @@ from .serializers import (
     RequestPasswordResetOTPSerializer,
     VerifyPasswordResetOTPSerializer,
     SetNewPasswordSerializer,
+    RequestLoginOTPSerializer,
+    VerifyLoginOTPSerializer,
 )
 from .permissions import (
     IsAdmin,
@@ -587,6 +590,327 @@ class ResetPasswordView(views.APIView):
             {"message": "Your password has been reset successfully. You may now log in with your new password."},
             status=status.HTTP_200_OK,
         )
+
+
+class RequestLoginOTPView(views.APIView):
+    """
+    Sends a 6-digit cryptographic OTP for mobile number or email login.
+    Supports Dual-Identity Handshake:
+    - If user exists with this phone: dispatches to their verified linked email.
+    - If user is new: validates their provided email address, confirms no collision, and dispatches OTP.
+    - If identifier is email: dispatches directly to email.
+    Enforces 60-second cooldown rate-limiting and 10-minute expiry.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        try:
+            serializer = RequestLoginOTPSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            identifier = serializer.validated_data["identifier"]
+            ident_type = serializer.validated_data["identifier_type"]
+            target_email = serializer.validated_data["target_email"]
+            user = serializer.validated_data.get("resolved_user")
+            is_new_user = serializer.validated_data.get("is_new_user", False)
+            link_to_existing = serializer.validated_data.get("link_to_existing")
+
+            # Check if user is suspended/disabled
+            user_to_check = user or link_to_existing
+            if user_to_check and (not user_to_check.is_active or user_to_check.status in ("SUSPENDED", "DISABLED")):
+                return Response(
+                    {
+                        "error": "This account has been suspended or disabled. Please contact arena support.",
+                        "status": "INACTIVE",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Cooldown check: 60 seconds between OTP requests for this identifier OR target_email
+            recent_otp = (
+                LoginOTP.objects.filter(
+                    Q(identifier=identifier) | Q(identifier=target_email),
+                    is_used=False,
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            now = timezone.now()
+            if recent_otp and (now - recent_otp.created_at).total_seconds() < 60:
+                remaining = 60 - int((now - recent_otp.created_at).total_seconds())
+                return Response(
+                    {
+                        "error": f"Please wait {remaining} seconds before requesting a new passcode.",
+                        "cooldown_seconds": remaining,
+                    },
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+
+            # Client metadata
+            x_forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
+            ip_addr = x_forwarded.split(",")[0].strip() if x_forwarded else (request.META.get("REMOTE_ADDR") or "")
+            user_agent = str(request.META.get("HTTP_USER_AGENT", ""))[:500]
+
+            # Invalidate any unverified OTPs for this target_email AND identifier
+            LoginOTP.objects.filter(
+                Q(identifier=target_email) | Q(identifier=identifier),
+                is_used=False
+            ).update(is_used=True)
+
+            otp_instance, raw_otp = LoginOTP.generate_otp_for_identifier(
+                identifier=target_email,
+                channel="EMAIL",
+                user=user_to_check,
+                validity_minutes=10,
+                ip_address=ip_addr,
+                user_agent=user_agent,
+            )
+
+            # If requesting via phone, also index by phone so verify-otp can find the session regardless of parameters passed
+            if ident_type == "phone" and identifier != target_email:
+                LoginOTP.objects.create(
+                    identifier=identifier,
+                    channel="EMAIL",
+                    user=user_to_check,
+                    otp_hash=otp_instance.otp_hash,
+                    expires_at=otp_instance.expires_at,
+                    ip_address=ip_addr,
+                    user_agent=user_agent,
+                )
+
+            # Dispatch branded HTML email via Django SMTP
+            user_to_send = user_to_check or User(email=target_email, first_name="Player")
+            EmailNotificationService.send_otp_email(
+                user=user_to_send,
+                otp_code=raw_otp,
+                valid_minutes=10,
+                ip_address=ip_addr,
+            )
+
+            logger.info("Login OTP generated for %s [target: %s]: %s", identifier, target_email, raw_otp)
+
+            masked_email = user_lookup_engine.mask_email(target_email)
+            masked_phone = user_lookup_engine.mask_phone(identifier) if ident_type == "phone" else ""
+
+            AuditLog.log(
+                user=user_to_check,
+                action="LOGIN_OTP_REQUESTED",
+                resource_type="AUTH",
+                resource_id=identifier,
+                details={"target_email": masked_email, "identifier_type": ident_type, "is_new_user": is_new_user},
+                request=request,
+            )
+
+            resp_data = {
+                "status": "OTP_SENT",
+                "message": f"Verification passcode sent to {masked_email}.",
+                "identifier": identifier,
+                "identifier_type": ident_type,
+                "target_email": target_email,
+                "masked_email": masked_email,
+                "masked_phone": masked_phone,
+                "is_existing_player": not is_new_user,
+                "cooldown_seconds": 60,
+            }
+
+            # In development or if DEBUG=True, provide dev_otp for rapid testing
+            if settings.DEBUG or getattr(settings, "ENVIRONMENT", "") != "production":
+                resp_data["dev_otp"] = raw_otp
+
+            return Response(resp_data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.exception("Error requesting login OTP: %s", e)
+            return Response(
+                {"error": "Failed to send verification passcode. Please try again.", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class VerifyLoginOTPView(views.APIView):
+    """
+    Verifies 6-digit cryptographic OTP.
+    Authenticates existing users or provisions new player accounts with verified phone & email.
+    Issues JWT access and refresh tokens.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        try:
+            serializer = VerifyLoginOTPSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            identifier = serializer.validated_data["identifier"]
+            ident_type = serializer.validated_data["identifier_type"]
+            candidate_otp = serializer.validated_data["otp"]
+            provided_email = serializer.validated_data.get("email")
+            first_name = serializer.validated_data.get("first_name", "Player")
+
+            # Look up active OTP by email, identifier, or phone's linked account
+            active_otp = None
+            if provided_email:
+                active_otp = (
+                    LoginOTP.objects.filter(identifier=provided_email, is_used=False)
+                    .order_by("-created_at")
+                    .first()
+                )
+
+            if not active_otp:
+                active_otp = (
+                    LoginOTP.objects.filter(identifier=identifier, is_used=False)
+                    .order_by("-created_at")
+                    .first()
+                )
+
+            if not active_otp and ident_type == "phone":
+                raw_10 = identifier[-10:] if len(identifier) >= 10 else identifier
+                user_found = User.objects.filter(
+                    Q(phone__endswith=raw_10) | Q(phone__iexact=identifier)
+                ).first()
+                if user_found:
+                    active_otp = (
+                        LoginOTP.objects.filter(identifier=user_found.email.lower(), is_used=False)
+                        .order_by("-created_at")
+                        .first()
+                    )
+
+            if not active_otp:
+                return Response(
+                    {"error": "No pending passcode found. Please request a new verification code."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if active_otp.is_expired():
+                return Response(
+                    {"error": "This passcode has expired. Please request a fresh code."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if active_otp.is_locked():
+                return Response(
+                    {"error": "Too many failed attempts. For your security, this code is locked. Please request a new one."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            is_valid = active_otp.verify_code(candidate_otp)
+            if not is_valid:
+                attempts_left = max(0, active_otp.max_attempts - active_otp.attempts)
+                return Response(
+                    {
+                        "error": f"Invalid verification code. {attempts_left} attempts remaining.",
+                        "attempts_left": attempts_left,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # OTP successfully verified -> mark used
+            active_otp.is_used = True
+            active_otp.save(update_fields=["is_used"])
+            # Invalidate all linked OTP records with this hash
+            LoginOTP.objects.filter(otp_hash=active_otp.otp_hash, is_used=False).update(is_used=True)
+
+            # Resolve user or auto-provision
+            user = None
+            if ident_type == "email":
+                user = User.objects.filter(email__iexact=identifier).first()
+            else:
+                raw_10 = identifier[-10:] if len(identifier) >= 10 else identifier
+                user = User.objects.filter(
+                    Q(phone__endswith=raw_10) | Q(phone__iexact=identifier)
+                ).first()
+
+            # If user not found by phone, check if active_otp.identifier is an email
+            if not user and "@" in active_otp.identifier:
+                user = User.objects.filter(email__iexact=active_otp.identifier).first()
+
+            if not user:
+                # Provision new player account with verified mobile + email
+                final_email = provided_email or (active_otp.identifier if "@" in active_otp.identifier else "")
+                if not final_email:
+                    linked_email_otp = LoginOTP.objects.filter(otp_hash=active_otp.otp_hash, identifier__contains="@").first()
+                    if linked_email_otp:
+                        final_email = linked_email_otp.identifier
+                if not final_email:
+                    final_email = f"player_{identifier[-10:]}@friendsturf.com"
+
+                user = User.objects.create_user(
+                    email=final_email,
+                    password=None,
+                    first_name=first_name or "Player",
+                    last_name="",
+                    phone=identifier if ident_type == "phone" else "",
+                    role="CUSTOMER",
+                    status="ACTIVE",
+                )
+
+                # Add to lookup bloom filter
+                user_lookup_engine.add_to_filter(user.email)
+                if user.phone:
+                    user_lookup_engine.add_to_filter(user.phone)
+
+                AuditLog.log(
+                    user=user,
+                    action="CUSTOMER_REGISTERED_OTP",
+                    resource_type="AUTH",
+                    resource_id=identifier,
+                    details={"phone": user.phone, "email": user.email, "role": "CUSTOMER"},
+                    request=request,
+                )
+            else:
+                # User exists: link phone if they didn't have one
+                if ident_type == "phone" and not user.phone:
+                    user.phone = identifier
+                    user_lookup_engine.add_to_filter(user.phone)
+                # Link email if existing user didn't have one or had a placeholder
+                if provided_email and (not user.email or user.email.endswith("@friendsturf.com")):
+                    user.email = provided_email
+                    user_lookup_engine.add_to_filter(user.email)
+
+            if user.status in ("SUSPENDED", "DISABLED") or not user.is_active:
+                return Response(
+                    {
+                        "error": "This account has been suspended or disabled. Please contact the arena desk.",
+                        "status": "INACTIVE",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # If user was INVITED, activate them
+            if user.status == "INVITED":
+                user.status = "ACTIVE"
+
+            user.last_login_at = timezone.now()
+            user.save()
+
+            AuditLog.log(
+                user=user,
+                action="LOGIN_SUCCESS_OTP",
+                resource_type="AUTH",
+                resource_id=identifier,
+                details={"identifier_type": ident_type, "role": user.role},
+                request=request,
+            )
+
+            tokens = get_tokens_for_user(user)
+            user_data = UserSerializer(user).data
+
+            return Response(
+                {
+                    "message": "Login successful",
+                    "user": user_data,
+                    "tokens": tokens,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.exception("Error verifying login OTP: %s", e)
+            return Response(
+                {"error": "Failed to complete login verification. Please try again.", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class RegisterView(views.APIView):

@@ -1,7 +1,9 @@
 import re
+from typing import Tuple
 from rest_framework import serializers
 from django.contrib.auth import authenticate
-from .models import User, CustomerProfile, StaffProfile
+from django.db.models import Q
+from .models import User, CustomerProfile, StaffProfile, LoginOTP
 
 
 def validate_password_complexity(password: str) -> str:
@@ -28,6 +30,109 @@ def validate_indian_phone_number(phone: str) -> str:
     if not re.match(r"^[6-9]\d{9}$", raw_10):
         raise serializers.ValidationError("Please enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.")
     return f"+91{raw_10}"
+
+
+def normalize_auth_identifier(identifier: str) -> Tuple[str, str]:
+    """
+    Validates and standardizes an authentication identifier (email or Indian mobile number).
+    Returns (normalized_value, identifier_type) where identifier_type is 'email' or 'phone'.
+    """
+    raw = (identifier or "").strip()
+    if not raw:
+        raise serializers.ValidationError("Please enter your mobile number or email address.")
+    
+    if "@" in raw:
+        email_regex = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+        if not re.match(email_regex, raw):
+            raise serializers.ValidationError("Please enter a valid email address.")
+        return User.canonicalize_email(raw), "email"
+    else:
+        # Validate as Indian mobile number
+        formatted = validate_indian_phone_number(raw)
+        return formatted, "phone"
+
+
+class RequestLoginOTPSerializer(serializers.Serializer):
+    identifier = serializers.CharField(required=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    channel = serializers.ChoiceField(choices=["SMS", "EMAIL"], required=False, default="EMAIL")
+
+    def validate(self, data):
+        ident = data.get("identifier", "").strip()
+        canonical, ident_type = normalize_auth_identifier(ident)
+        data["identifier"] = canonical
+        data["identifier_type"] = ident_type
+
+        provided_email = (data.get("email") or "").strip().lower()
+
+        if ident_type == "phone":
+            # Lookup user by phone in database
+            raw_10 = canonical[-10:] if len(canonical) >= 10 else canonical
+            user = User.objects.filter(
+                Q(phone__endswith=raw_10) | Q(phone__iexact=canonical)
+            ).first()
+
+            if user:
+                # Registered user found for this phone
+                registered_email = User.canonicalize_email(user.email)
+                # If client provided an email confirmation, check match
+                if provided_email and provided_email != registered_email:
+                    raise serializers.ValidationError({
+                        "email": "The provided email does not match the registered account for this mobile number."
+                    })
+                data["resolved_user"] = user
+                data["target_email"] = registered_email
+                data["is_new_user"] = False
+            else:
+                # New user registering with this phone
+                if not provided_email:
+                    raise serializers.ValidationError({
+                        "email": "Email address is required for new player registration."
+                    })
+                # Check cross-identity collision: is this email already taken by someone else?
+                existing_email_user = User.objects.filter(email__iexact=provided_email).first()
+                if existing_email_user:
+                    # Check if this existing user already has a different phone number
+                    clean_existing_phone = re.sub(r"[^\d+]", "", existing_email_user.phone or "")
+                    if clean_existing_phone and clean_existing_phone[-10:] != raw_10:
+                        raise serializers.ValidationError({
+                            "email": "An account with this email is already registered with a different mobile number. Please sign in with that number or email."
+                        })
+                    data["link_to_existing"] = existing_email_user
+
+                data["target_email"] = provided_email
+                data["is_new_user"] = True
+                data["resolved_user"] = None
+        else:
+            # Identifier is email directly
+            data["target_email"] = canonical
+            data["resolved_user"] = User.objects.filter(email__iexact=canonical).first()
+            data["is_new_user"] = not bool(data["resolved_user"])
+
+        data["channel"] = "EMAIL"
+        return data
+
+
+class VerifyLoginOTPSerializer(serializers.Serializer):
+    identifier = serializers.CharField(required=True)
+    otp = serializers.CharField(min_length=6, max_length=6, required=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    first_name = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_otp(self, value):
+        clean = (value or "").strip()
+        if not re.match(r"^\d{6}$", clean):
+            raise serializers.ValidationError("OTP must be exactly 6 numeric digits.")
+        return clean
+
+    def validate(self, data):
+        ident = data.get("identifier", "").strip()
+        canonical, ident_type = normalize_auth_identifier(ident)
+        data["identifier"] = canonical
+        data["identifier_type"] = ident_type
+        if data.get("email"):
+            data["email"] = data["email"].strip().lower()
+        return data
 
 
 class CheckAvailabilitySerializer(serializers.Serializer):
@@ -244,23 +349,41 @@ class AdminCustomerCreateSerializer(serializers.Serializer):
 
 
 class LoginSerializer(serializers.Serializer):
-    email = serializers.EmailField()
+    email = serializers.CharField(required=False, allow_blank=True)
+    identifier = serializers.CharField(required=False, allow_blank=True)
     password = serializers.CharField(write_only=True)
 
     def validate(self, data):
-        email = data.get("email", "").strip().lower()
+        raw_id = (data.get("identifier") or data.get("email") or "").strip()
         password = data.get("password", "")
-        if not email or not password:
-            raise serializers.ValidationError("Email and password are required.")
+        if not raw_id or not password:
+            raise serializers.ValidationError("Mobile number or email and password are required.")
 
-        user = authenticate(username=email, password=password)
-        if not user:
-            found_user = User.objects.filter(email__iexact=email).first()
+        user = None
+        if "@" in raw_id:
+            email_canonical = User.canonicalize_email(raw_id)
+            user = authenticate(username=email_canonical, password=password)
+            if not user:
+                found_user = User.objects.filter(email__iexact=email_canonical).first()
+                if found_user and found_user.check_password(password):
+                    user = found_user
+        else:
+            # Indian mobile number lookup
+            try:
+                formatted_phone = validate_indian_phone_number(raw_id)
+                raw_10 = formatted_phone[-10:]
+            except serializers.ValidationError:
+                raw_10 = re.sub(r"\D", "", raw_id)[-10:]
+                formatted_phone = f"+91{raw_10}" if len(raw_10) == 10 else raw_id
+
+            found_user = User.objects.filter(
+                Q(phone__endswith=raw_10) | Q(phone__iexact=formatted_phone) | Q(phone__iexact=raw_id)
+            ).first()
             if found_user and found_user.check_password(password):
                 user = found_user
 
         if not user:
-            raise serializers.ValidationError("Invalid email or password.")
+            raise serializers.ValidationError("Invalid credentials. Please verify your mobile number/email and password.")
         if not user.is_active or user.status in ("SUSPENDED", "DISABLED"):
             raise serializers.ValidationError("This account has been suspended or disabled.")
         data["user"] = user

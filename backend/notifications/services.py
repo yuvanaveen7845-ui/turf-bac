@@ -1,3 +1,6 @@
+import os
+import re
+import requests
 import base64
 from email.mime.image import MIMEImage
 from datetime import timedelta
@@ -256,3 +259,70 @@ class ReminderService:
                 reminders_sent += 1
 
         return reminders_sent
+
+
+class SMSNotificationService:
+    """
+    Enterprise SMS Notification Service for Friends Turf.
+    Supports multi-provider dispatch:
+    1. Fast2SMS (Indian OTP Gateway)
+    2. Twilio (Global SMS & WhatsApp)
+    3. Development / Mock fallback (Logs to console & system logger)
+    """
+
+    @classmethod
+    def send_login_otp(cls, phone: str, otp_code: str, valid_minutes: int = 10) -> bool:
+        """
+        Dispatches OTP code to the recipient mobile number.
+        """
+        clean_phone = re.sub(r"[^\d+]", "", str(phone or "").strip())
+        raw_10 = clean_phone[-10:] if len(clean_phone) >= 10 else clean_phone
+
+        sms_message = (
+            f"Your Friends Turf login OTP is: {otp_code}. "
+            f"Valid for {valid_minutes} minutes. Please do not share this passcode with anyone."
+        )
+
+        # 1. Fast2SMS Integration (Indian Gateway)
+        fast2sms_key = os.environ.get("FAST2SMS_API_KEY", "").strip()
+        if fast2sms_key and len(raw_10) == 10:
+            try:
+                url = "https://www.fast2sms.com/dev/bulkV2"
+                payload = {
+                    "variables_values": otp_code,
+                    "route": "otp",
+                    "numbers": raw_10,
+                }
+                headers = {
+                    "authorization": fast2sms_key,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                }
+                resp = requests.post(url, data=payload, headers=headers, timeout=5)
+                logger.info(f"Fast2SMS OTP sent to {raw_10}: {resp.status_code}")
+                return resp.status_code == 200
+            except Exception as e:
+                logger.warning(f"Fast2SMS dispatch failed: {e}")
+
+        # 2. Twilio SMS Integration
+        twilio_sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+        twilio_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+        twilio_from = os.environ.get("TWILIO_PHONE_NUMBER", "").strip()
+        if twilio_sid and twilio_token and twilio_from:
+            try:
+                to_number = f"+91{raw_10}" if not clean_phone.startswith("+") else clean_phone
+                twilio_url = f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json"
+                resp = requests.post(
+                    twilio_url,
+                    auth=(twilio_sid, twilio_token),
+                    data={"From": twilio_from, "To": to_number, "Body": sms_message},
+                    timeout=5,
+                )
+                logger.info(f"Twilio OTP sent to {to_number}: {resp.status_code}")
+                return resp.status_code in (200, 201)
+            except Exception as e:
+                logger.warning(f"Twilio dispatch failed: {e}")
+
+        # 3. Development / Mock fallback
+        logger.info(f"[DEV SMS GATEWAY] Dispatch to {clean_phone}: '{sms_message}'")
+        return True
+

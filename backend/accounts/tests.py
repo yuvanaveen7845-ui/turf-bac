@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 from rest_framework import status
 
-from .models import User, CustomerProfile, StaffProfile, PasswordResetToken, BusinessSetting
+from .models import User, CustomerProfile, StaffProfile, PasswordResetToken, BusinessSetting, LoginOTP
 from .permissions import (
     ROLE_PERMISSIONS,
     user_has_permission,
@@ -71,6 +71,156 @@ class AccountsAuthTests(TestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_mobile_number_password_login_success(self):
+        self.customer_user.phone = "+919876543210"
+        self.customer_user.save()
+
+        # Login using 10-digit mobile number + password
+        response = self.client.post(
+            "/api/auth/login/",
+            {"identifier": "9876543210", "password": self.password},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("tokens", response.data)
+        self.assertEqual(response.data["user"]["email"], "player@example.com")
+
+        # Also supports +91 format in 'email' field for backwards compatibility
+        response2 = self.client.post(
+            "/api/auth/login/",
+            {"email": "+91 98765 43210", "password": self.password},
+            format="json",
+        )
+        self.assertEqual(response2.status_code, status.HTTP_200_OK)
+
+    def test_request_and_verify_login_otp_for_existing_mobile(self):
+        # 1. Existing user with mobile number
+        self.customer_user.phone = "+919876543210"
+        self.customer_user.save()
+
+        phone = "9876543210"
+        # Request OTP using mobile number -> dispatches to their linked email!
+        res_otp = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": phone},
+            format="json",
+        )
+        self.assertEqual(res_otp.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_otp.data["status"], "OTP_SENT")
+        self.assertTrue(res_otp.data["is_existing_player"])
+        self.assertEqual(res_otp.data["target_email"], "player@example.com")
+        self.assertIn("dev_otp", res_otp.data)
+        dev_otp = res_otp.data["dev_otp"]
+
+        # 2. Verify with valid OTP
+        res_success = self.client.post(
+            "/api/auth/login/verify-otp/",
+            {"identifier": phone, "otp": dev_otp},
+            format="json",
+        )
+        self.assertEqual(res_success.status_code, status.HTTP_200_OK)
+        self.assertIn("tokens", res_success.data)
+        self.assertEqual(res_success.data["user"]["email"], "player@example.com")
+
+    def test_existing_mobile_mismatched_email_rejected(self):
+        self.customer_user.phone = "+919876543210"
+        self.customer_user.save()
+
+        # Attacker tries to provide victim's phone with attacker's email
+        res = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": "9876543210", "email": "attacker@evil.com"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("email", res.data)
+
+    def test_new_mobile_requires_email(self):
+        # New mobile without email is rejected
+        res = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": "9800011122"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("email", res.data)
+
+    def test_new_mobile_with_email_provisions_account(self):
+        new_phone = "9800011122"
+        new_email = "newplayer@example.com"
+
+        res_otp = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": new_phone, "email": new_email},
+            format="json",
+        )
+        self.assertEqual(res_otp.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_otp.data["is_existing_player"])
+        dev_otp = res_otp.data["dev_otp"]
+
+        res_ver = self.client.post(
+            "/api/auth/login/verify-otp/",
+            {"identifier": new_phone, "email": new_email, "otp": dev_otp},
+            format="json",
+        )
+        self.assertEqual(res_ver.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_ver.data["user"]["email"], new_email)
+        self.assertEqual(res_ver.data["user"]["phone"], f"+91{new_phone}")
+
+        # Account exists in DB
+        created = User.objects.get(email=new_email)
+        self.assertEqual(created.phone, f"+91{new_phone}")
+
+    def test_new_mobile_cross_identity_collision_rejected(self):
+        # Customer user already has player@example.com with phone +919876543210
+        self.customer_user.phone = "+919876543210"
+        self.customer_user.save()
+
+        # Someone tries to claim player@example.com with a DIFFERENT phone number
+        res = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": "9811122233", "email": "player@example.com"},
+            format="json",
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("email", res.data)
+
+    def test_request_and_verify_login_otp_for_email(self):
+        email = "player@example.com"
+        res_otp = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": email},
+            format="json",
+        )
+        self.assertEqual(res_otp.status_code, status.HTTP_200_OK)
+        dev_otp = res_otp.data["dev_otp"]
+
+        res_success = self.client.post(
+            "/api/auth/login/verify-otp/",
+            {"identifier": email, "otp": dev_otp},
+            format="json",
+        )
+        self.assertEqual(res_success.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_success.data["user"]["email"], "player@example.com")
+
+    def test_login_otp_rate_limiting_cooldown(self):
+        email = "cooldown.test@example.com"
+        res1 = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": email},
+            format="json",
+        )
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+
+        # Immediate second request triggers 429
+        res2 = self.client.post(
+            "/api/auth/login/request-otp/",
+            {"identifier": email},
+            format="json",
+        )
+        self.assertEqual(res2.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertIn("cooldown_seconds", res2.data)
 
     def test_public_registration_cannot_self_select_role(self):
         """Users attempting to register with role=ADMIN or role=STAFF must be forced to CUSTOMER."""

@@ -128,11 +128,24 @@ class User(AbstractBaseUser, PermissionsMixin):
             while User.objects.filter(referral_code=code).exists():
                 code = f"FT{uuid.uuid4().hex[:6].upper()}"
             self.referral_code = code
+        if self.phone:
+            self.phone = self.canonicalize_phone(self.phone)
+        if not self.password:
+            self.set_unusable_password()
         super().save(*args, **kwargs)
         if self.role == "CUSTOMER":
             CustomerProfile.objects.get_or_create(user=self)
         elif self.role in ("STAFF", "ADMIN"):
             StaffProfile.objects.get_or_create(user=self)
+
+        try:
+            from .lookup_service import user_lookup_engine
+            if self.email:
+                user_lookup_engine.add_to_filter(self.canonicalize_email(self.email))
+            if self.phone:
+                user_lookup_engine.add_to_filter(self.canonicalize_phone(self.phone))
+        except Exception:
+            pass
 
     def delete(self, *args, **kwargs):
         if self.is_permanent_admin():
@@ -143,6 +156,19 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f"{self.email} ({self.role}) [{self.status}]"
+
+    def is_unclaimed_guest(self) -> bool:
+        """
+        Returns True if this user was provisioned during guest checkout or desk walk-in
+        without a usable password or Google OAuth link.
+        """
+        if self.role != "CUSTOMER":
+            return False
+        if getattr(self, "google_id", None):
+            return False
+        if not self.password or not self.has_usable_password():
+            return True
+        return False
 
     @property
     def full_name(self):

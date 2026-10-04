@@ -264,15 +264,29 @@ class CheckUserAvailabilityView(views.APIView):
             exists, user = user_lookup_engine.check_phone_exists(validated_val)
             masked = user_lookup_engine.mask_phone(validated_val)
 
+        is_claimable_guest = False
+        if exists and user and user.is_unclaimed_guest():
+            exists = False
+            is_claimable_guest = True
+
         resp_data = {
             "exists": exists,
             "field": validated_field,
             "status": "REGISTERED" if exists else "AVAILABLE",
+            "is_claimable_guest": is_claimable_guest,
             "masked_value": masked,
             "message": (
                 f"An account is already registered with this {validated_field}."
                 if exists
-                else f"This {validated_field} is available."
+                else (
+                    "Mobile number available. Registering will link your previous match bookings."
+                    if is_claimable_guest and validated_field == "phone"
+                    else (
+                        "Email available. Registering will link your previous match bookings."
+                        if is_claimable_guest
+                        else f"This {validated_field} is available."
+                    )
+                )
             ),
         }
         if user and getattr(user, "phone", None):
@@ -863,8 +877,15 @@ class VerifyLoginOTPView(views.APIView):
                 if ident_type == "phone" and not user.phone:
                     user.phone = identifier
                     user_lookup_engine.add_to_filter(user.phone)
-                # Link email if existing user didn't have one or had a placeholder
-                if provided_email and (not user.email or user.email.endswith("@friendsturf.com")):
+                # Link email if existing user didn't have one or had a placeholder / guest email
+                if provided_email and (
+                    not user.email
+                    or user.email.endswith("@friendsturf.com")
+                    or user.email.endswith("@friendsturf.local")
+                    or user.email.startswith("guest_")
+                    or user.email.startswith("walkin_")
+                    or user.email.startswith("player_")
+                ):
                     user.email = provided_email
                     user_lookup_engine.add_to_filter(user.email)
 
@@ -1258,6 +1279,15 @@ class BusinessSettingsView(views.APIView):
         settings_dict = {}
         for section in DEFAULT_BUSINESS_SETTINGS.keys():
             settings_dict[section] = BusinessSettingsHelper.get_section(section)
+
+        # Sanitize payments: never expose private API secrets to the client
+        if "payments" in settings_dict and isinstance(settings_dict["payments"], dict):
+            payments_sanitized = dict(settings_dict["payments"])
+            for secret_key in ("keySecret", "testKeySecret", "liveKeySecret"):
+                if secret_key in payments_sanitized:
+                    payments_sanitized[secret_key] = "••••••••" if payments_sanitized[secret_key] else ""
+            settings_dict["payments"] = payments_sanitized
+
         # Include feature flags in response
         features_record = BusinessSetting.objects.filter(key="features").first()
         settings_dict["features"] = (

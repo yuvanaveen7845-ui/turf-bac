@@ -176,13 +176,30 @@ class SystemRemediationMasterTests(TestCase):
         }
         self.client.force_authenticate(user=self.customer)
 
-        # slot1 (18:00-19:00) and slot2 (19:00-20:00) are consecutive
+        # slot1 (18:00-19:00) and slot2 (19:00-20:00) on future date to avoid evening cutoff
+        future_date = self.today + timedelta(days=1)
+        f_slot1 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(18, 0),
+            end_time=time(19, 0),
+            price=Decimal("1200.00"),
+            status="AVAILABLE",
+        )
+        f_slot2 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(19, 0),
+            end_time=time(20, 0),
+            price=Decimal("1200.00"),
+            status="AVAILABLE",
+        )
         response = self.client.post(
             "/api/payments/razorpay/create-order/",
             {
                 "turf_id": str(self.turf.id),
-                "date": str(self.today),
-                "slot_ids": [str(self.slot1.id), str(self.slot2.id)],
+                "date": str(future_date),
+                "slot_ids": [str(f_slot1.id), str(f_slot2.id)],
                 "payment_type": "FULL",
             },
             format="json",
@@ -373,3 +390,132 @@ class SystemRemediationMasterTests(TestCase):
             success = EmailNotificationService.send_booking_confirmation_email(booking)
             self.assertTrue(success)
             self.assertTrue(mock_send.called)
+
+    # -------------------------------------------------------------------------
+    # Customer Requirement: Hourly Minimum Advance Rate (₹100/hr)
+    # -------------------------------------------------------------------------
+    def test_hourly_advance_rate_duration_calculation(self):
+        """Validates that minimum advance is duration_hours * hourly_rate (e.g. 2h * ₹100 = ₹200)."""
+        future_date = self.today + timedelta(days=2)
+        s1 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(10, 0),
+            end_time=time(11, 0),
+            price=Decimal("1000.00"),
+            status="AVAILABLE",
+        )
+        s2 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(11, 0),
+            end_time=time(12, 0),
+            price=Decimal("1000.00"),
+            status="AVAILABLE",
+        )
+
+        # 1. Booking for 2 hours with default minimum advance -> exactly ₹200 (2h * ₹100/hr)
+        booking = BookingEngine.create_booking(
+            turf=self.turf,
+            date_obj=future_date,
+            slot_ids=[s1.id, s2.id],
+            user=self.customer,
+            booking_type="REGULAR",
+            payment_type="ADVANCE",
+            payment_method="UPI",
+        )
+        self.assertEqual(booking.amount_paid, Decimal("200.00"))
+        self.assertEqual(booking.balance_due, booking.final_amount - Decimal("200.00"))
+
+    def test_custom_advance_payment_above_minimum(self):
+        """Customer can pay more than the minimum advance (e.g. ₹500 for a ₹200 minimum)."""
+        future_date = self.today + timedelta(days=3)
+        s1 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(14, 0),
+            end_time=time(15, 0),
+            price=Decimal("1200.00"),
+            status="AVAILABLE",
+        )
+        s2 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(15, 0),
+            end_time=time(16, 0),
+            price=Decimal("1200.00"),
+            status="AVAILABLE",
+        )
+
+        # Customer chooses to pay ₹500 advance (minimum is ₹200)
+        booking = BookingEngine.create_booking(
+            turf=self.turf,
+            date_obj=future_date,
+            slot_ids=[s1.id, s2.id],
+            user=self.customer,
+            booking_type="REGULAR",
+            payment_type="ADVANCE",
+            advance_amount=Decimal("500.00"),
+            payment_method="UPI",
+        )
+        self.assertEqual(booking.amount_paid, Decimal("500.00"))
+        self.assertEqual(booking.balance_due, booking.final_amount - Decimal("500.00"))
+
+    def test_custom_advance_rejected_if_below_minimum(self):
+        """Attempting to pay less than ₹100/hr (e.g. ₹50 for a 2h booking) must be rejected."""
+        future_date = self.today + timedelta(days=4)
+        s1 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(16, 0),
+            end_time=time(17, 0),
+            price=Decimal("1200.00"),
+            status="AVAILABLE",
+        )
+        s2 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(17, 0),
+            end_time=time(18, 0),
+            price=Decimal("1200.00"),
+            status="AVAILABLE",
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            BookingEngine.create_booking(
+                turf=self.turf,
+                date_obj=future_date,
+                slot_ids=[s1.id, s2.id],
+                user=self.customer,
+                booking_type="REGULAR",
+                payment_type="ADVANCE",
+                advance_amount=Decimal("50.00"),  # Less than ₹200 minimum
+                payment_method="UPI",
+            )
+        self.assertIn("Minimum advance payment of ₹200.00 required", str(ctx.exception))
+
+    def test_advance_exceeding_final_amount_is_clamped_to_final_amount(self):
+        """If user enters custom advance greater than total booking amount, it safely clamps to final_amount."""
+        future_date = self.today + timedelta(days=5)
+        s1 = TimeSlot.objects.create(
+            turf=self.turf,
+            date=future_date,
+            start_time=time(14, 0),
+            end_time=time(15, 0),
+            price=Decimal("800.00"),
+            status="AVAILABLE",
+        )
+        booking = BookingEngine.create_booking(
+            turf=self.turf,
+            date_obj=future_date,
+            slot_ids=[s1.id],
+            user=self.customer,
+            booking_type="REGULAR",
+            payment_type="ADVANCE",
+            advance_amount=Decimal("9999.00"),  # Exceeds total
+            payment_method="UPI",
+        )
+        self.assertEqual(booking.amount_paid, booking.final_amount)
+        self.assertEqual(booking.balance_due, Decimal("0.00"))
+        self.assertEqual(booking.status, "CONFIRMED")
+

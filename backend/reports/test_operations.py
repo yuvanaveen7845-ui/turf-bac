@@ -504,3 +504,17 @@ class OperationsControlCenterForensicTests(TestCase):
         self.assertEqual(res_book["Content-Type"], "text/csv")
         content_book = res_book.content.decode("utf-8")
         self.assertIn("FT-26-GUEST01", content_book)
+
+        # 4. Customer Follow-up List (Strictly 4 Columns: Date, Time, Who / Customer, Name)
+        res_followup = self.client.get("/api/reports/export-csv/?type=followup&filter=this_week")
+        self.assertEqual(res_followup.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_followup["Content-Type"], "text/csv")
+        self.assertIn("friends_turf_customer_followup.csv", res_followup["Content-Disposition"])
+        content_followup = res_followup.content.decode("utf-8").strip().splitlines()
+        header = [col.strip() for col in content_followup[0].split(",")]
+        self.assertEqual(header, ["Date", "Time", "Who / Customer", "Name"])
+        self.assertGreaterEqual(len(content_followup), 2)
+        # Check first data row has exactly 4 items
+        first_row = [col.strip() for col in content_followup[1].split(",")]
+        self.assertEqual(len(first_row), 4)
+

@@ -10,10 +10,13 @@ from .views import (
     StaffTodayBookingsView,
     StaffWalkInBookingView,
     RecordOfflinePaymentView,
+    GuestPassLookupView,
 )
 
 urlpatterns = [
     path("", BookingListCreateView.as_view(), name="booking_list_create"),
+    path("lookup/", GuestPassLookupView.as_view(), name="guest_lookup"),
+    path("guest-lookup/", GuestPassLookupView.as_view(), name="guest_lookup_alias"),
     path("price-preview/", PricePreviewView.as_view(), name="price_preview"),
     path("preview-price/", PricePreviewView.as_view(), name="preview_price"),
     path("walk-in/", StaffWalkInBookingView.as_view(), name="walk_in"),

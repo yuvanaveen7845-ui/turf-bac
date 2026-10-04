@@ -73,16 +73,41 @@ class RequestLoginOTPSerializer(serializers.Serializer):
             ).first()
 
             if user:
-                # Registered user found for this phone
-                registered_email = User.canonicalize_email(user.email)
-                # If client provided an email confirmation, check match
-                if provided_email and provided_email != registered_email:
-                    raise serializers.ValidationError({
-                        "email": "The provided email does not match the registered account for this mobile number."
-                    })
-                data["resolved_user"] = user
-                data["target_email"] = registered_email
-                data["is_new_user"] = False
+                # Check if this is an unclaimed guest with a dummy email
+                is_unclaimed_placeholder = (
+                    user.is_unclaimed_guest()
+                    and (
+                        user.email.endswith("@friendsturf.local")
+                        or user.email.endswith("@friendsturf.com")
+                        or user.email.startswith("guest_")
+                        or user.email.startswith("walkin_")
+                        or user.email.startswith("player_")
+                    )
+                )
+
+                if is_unclaimed_placeholder:
+                    if not provided_email:
+                        raise serializers.ValidationError({
+                            "email": "Please provide your email address to receive your login passcode and link your match bookings."
+                        })
+                    existing_email_user = User.objects.filter(email__iexact=provided_email).first()
+                    if existing_email_user and existing_email_user.id != user.id and not existing_email_user.is_unclaimed_guest():
+                        raise serializers.ValidationError({
+                            "email": "An account with this email is already registered. Please sign in with that email."
+                        })
+                    data["resolved_user"] = user
+                    data["target_email"] = provided_email
+                    data["is_new_user"] = False
+                    data["is_guest_upgrade"] = True
+                else:
+                    registered_email = User.canonicalize_email(user.email)
+                    if provided_email and provided_email != registered_email:
+                        raise serializers.ValidationError({
+                            "email": "The provided email does not match the registered account for this mobile number."
+                        })
+                    data["resolved_user"] = user
+                    data["target_email"] = registered_email
+                    data["is_new_user"] = False
             else:
                 # New user registering with this phone
                 if not provided_email:
@@ -161,7 +186,8 @@ class RegisterSerializer(serializers.Serializer):
 
     def validate_email(self, value):
         canonical = User.canonicalize_email(value)
-        if User.objects.filter(email__iexact=canonical).exists():
+        existing = User.objects.filter(email__iexact=canonical).first()
+        if existing and not existing.is_unclaimed_guest():
             raise serializers.ValidationError(
                 "An account with this email address already exists. Please Sign In."
             )
@@ -172,7 +198,10 @@ class RegisterSerializer(serializers.Serializer):
             return ""
         formatted = validate_indian_phone_number(value)
         raw_10 = formatted[-10:]
-        if User.objects.filter(phone__endswith=raw_10).exists():
+        existing = User.objects.filter(
+            Q(phone__endswith=raw_10) | Q(phone__iexact=formatted)
+        ).first()
+        if existing and not existing.is_unclaimed_guest():
             raise serializers.ValidationError(
                 "An account with this mobile number already exists. Please Sign In."
             )
@@ -182,12 +211,57 @@ class RegisterSerializer(serializers.Serializer):
         return validate_password_complexity(value)
 
     def create(self, validated_data):
+        email = validated_data["email"]
+        phone = validated_data.get("phone", "")
+        raw_10 = phone[-10:] if phone and len(phone) >= 10 else phone
+
+        existing_user = None
+        if email:
+            existing_user = User.objects.filter(email__iexact=email).first()
+        if not existing_user and raw_10:
+            existing_user = User.objects.filter(
+                Q(phone__endswith=raw_10) | Q(phone__iexact=phone)
+            ).first()
+
+        # Merge secondary guest user if separate record existed by phone
+        if raw_10:
+            phone_user = User.objects.filter(
+                Q(phone__endswith=raw_10) | Q(phone__iexact=phone)
+            ).first()
+            if phone_user and existing_user and phone_user.id != existing_user.id and phone_user.is_unclaimed_guest():
+                from bookings.models import Booking
+                from payments.models import Payment
+                Booking.objects.filter(customer=phone_user).update(customer=existing_user)
+                Payment.objects.filter(customer=phone_user).update(customer=existing_user)
+                phone_user.delete()
+
+        if existing_user and existing_user.is_unclaimed_guest():
+            # Seamless claim/upgrade: preserve past bookings and payments
+            existing_user.email = email
+            existing_user.set_password(validated_data["password"])
+            existing_user.first_name = validated_data.get("first_name", "") or existing_user.first_name
+            existing_user.last_name = validated_data.get("last_name", "") or existing_user.last_name
+            if phone:
+                existing_user.phone = phone
+            existing_user.role = "CUSTOMER"
+            existing_user.status = "ACTIVE"
+            existing_user.save()
+
+            CustomerProfile.objects.get_or_create(user=existing_user)
+
+            from .lookup_service import user_lookup_engine
+            user_lookup_engine.add_to_filter(existing_user.email)
+            if existing_user.phone:
+                user_lookup_engine.add_to_filter(existing_user.phone)
+
+            return existing_user
+
         user = User.objects.create_user(
-            email=validated_data["email"],
+            email=email,
             password=validated_data["password"],
             first_name=validated_data.get("first_name", ""),
             last_name=validated_data.get("last_name", ""),
-            phone=validated_data.get("phone", ""),
+            phone=phone,
             role="CUSTOMER",
             status="ACTIVE",
         )

@@ -259,8 +259,16 @@ if csrf_origins_env:
 else:
     CSRF_TRUSTED_ORIGINS = DEFAULT_CSRF_TRUSTED_ORIGINS
 
-# Authoritative Frontend Domain for strict post-payment redirects
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://friendsturf.in").rstrip("/")
+# Service Base URLs (12-Factor Canonical Configurations)
+DEFAULT_BACKEND_URL = "http://localhost:8000" if DEBUG else "https://turf-bac.onrender.com"
+BACKEND_URL = os.getenv("BACKEND_URL", DEFAULT_BACKEND_URL).rstrip("/")
+
+DEFAULT_FRONTEND_URL = "http://localhost:5173" if DEBUG else "https://friendsturf.in"
+FRONTEND_URL = os.getenv("FRONTEND_URL", DEFAULT_FRONTEND_URL).rstrip("/")
+
+# Compatibility aliases for specific frontend redirect references
+FRONTEND_URL_LOCAL = os.getenv("FRONTEND_URL_LOCAL", "http://localhost:5173").rstrip("/")
+FRONTEND_URL_LIVE = os.getenv("FRONTEND_URL_LIVE", "https://friendsturf.in").rstrip("/")
 
 # Production Security Configurations
 SECURE_CROSS_ORIGIN_OPENER_POLICY = os.getenv("SECURE_CROSS_ORIGIN_OPENER_POLICY", "same-origin-allow-popups")
@@ -284,18 +292,46 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
-# FRONTEND_URL is already defined above at line 263 defaulting to https://friendsturf.in
-
 # Google OAuth Settings (B2B Authentication)
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:5174/login")
 GOOGLE_ALLOWED_DOMAIN = os.getenv("GOOGLE_ALLOWED_DOMAIN", "")
 
-# Razorpay Payment Gateway Settings (Fetched strictly from Environment / .env)
-RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "").strip()
-RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "").strip()
-RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "").strip()
+# Razorpay Payment Gateway Settings (12-Factor Canonical with backward compatibility)
+# Resolves canonical RAZORPAY_KEY_ID or falls back to legacy variables based on environment
+RAZORPAY_KEY_ID = (
+    os.getenv("RAZORPAY_KEY_ID", "").strip()
+    or (os.getenv("RAZORPAY_TEST_KEY_ID", "").strip() if DEBUG else os.getenv("RAZORPAY_LIVE_KEY_ID", "").strip())
+    or os.getenv("RAZORPAY_TEST_KEY_ID", "").strip()
+    or os.getenv("RAZORPAY_LIVE_KEY_ID", "").strip()
+)
+RAZORPAY_KEY_SECRET = (
+    os.getenv("RAZORPAY_KEY_SECRET", "").strip()
+    or (os.getenv("RAZORPAY_TEST_KEY_SECRET", "").strip() if DEBUG else os.getenv("RAZORPAY_LIVE_KEY_SECRET", "").strip())
+    or os.getenv("RAZORPAY_TEST_KEY_SECRET", "").strip()
+    or os.getenv("RAZORPAY_LIVE_KEY_SECRET", "").strip()
+)
+RAZORPAY_WEBHOOK_SECRET = (
+    os.getenv("RAZORPAY_WEBHOOK_SECRET", "").strip()
+    or (os.getenv("RAZORPAY_TEST_WEBHOOK_SECRET", "").strip() if DEBUG else os.getenv("RAZORPAY_LIVE_WEBHOOK_SECRET", "").strip())
+    or os.getenv("RAZORPAY_TEST_WEBHOOK_SECRET", "").strip()
+    or os.getenv("RAZORPAY_LIVE_WEBHOOK_SECRET", "").strip()
+)
+
+# Canonical Razorpay Callback URL automatically bound to active BACKEND_URL
+_default_callback_url = f"{BACKEND_URL}/api/payments/razorpay/callback/"
+RAZORPAY_CALLBACK_URL = os.getenv(
+    "RAZORPAY_CALLBACK_URL",
+    os.getenv("RAZORPAY_LOCAL_CALLBACK_URL", _default_callback_url) if DEBUG else os.getenv("RAZORPAY_LIVE_CALLBACK_URL", _default_callback_url)
+).strip() or _default_callback_url
+
+# Optional override: RAZORPAY_MODE ("TEST" vs "LIVE")
+RAZORPAY_MODE = os.getenv(
+    "RAZORPAY_MODE",
+    "LIVE" if RAZORPAY_KEY_ID.startswith("rzp_live_") else ("TEST" if DEBUG else "LIVE")
+).upper().strip()
+
 
 # Django SMTP Email Configuration
 EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com").strip()

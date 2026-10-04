@@ -103,6 +103,7 @@ class TimeSlot(models.Model):
         ("LOCKED", "Temporarily Locked"),
         ("BOOKED", "Booked"),
         ("MAINTENANCE", "Under Maintenance"),
+        ("BLOCKED", "Admin Blocked"),
     )
 
     turf = models.ForeignKey(Turf, on_delete=models.CASCADE, related_name="slots")

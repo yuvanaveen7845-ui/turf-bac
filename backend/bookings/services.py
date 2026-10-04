@@ -170,6 +170,7 @@ class BookingEngine:
         notes="",
         participants=None,
         collected_by=None,
+        advance_amount=None,
     ):
         """
         Authoritative booking creation pipeline:
@@ -255,9 +256,21 @@ class BookingEngine:
                 amt_paid = final_amt
                 balance = Decimal("0.00")
                 b_status = "CONFIRMED"
-            elif payment_type == "PARTIAL":
-                deposit_fraction = BusinessSettingsHelper.get_advance_deposit_fraction()
-                amt_paid = round(final_amt * deposit_fraction, 2)
+            elif payment_type in ("PARTIAL", "ADVANCE"):
+                hourly_rate = BusinessSettingsHelper.get_hourly_advance_rate()
+                total_duration_minutes = sum(
+                    int((datetime.combine(date_obj, s.end_time) - datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                    for s in slots
+                )
+                duration_hours = Decimal(str(total_duration_minutes)) / Decimal("60.0")
+                minimum_advance = round(duration_hours * hourly_rate, 2)
+                effective_min_advance = min(minimum_advance, final_amt)
+                custom_advance = Decimal(str(advance_amount)) if advance_amount is not None else effective_min_advance
+                if custom_advance < effective_min_advance:
+                    raise ValueError(f"Minimum advance payment of ₹{effective_min_advance} required ({duration_hours} hr × ₹{hourly_rate}/hr).")
+                if custom_advance > final_amt:
+                    custom_advance = final_amt
+                amt_paid = custom_advance
                 balance = final_amt - amt_paid
                 b_status = "CONFIRMED"
             else:

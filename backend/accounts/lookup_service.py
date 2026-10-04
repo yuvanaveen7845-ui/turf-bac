@@ -135,8 +135,16 @@ class FastUserLookupEngine:
         # 2. Authoritative Database index lookup (checks raw and +91 formatted)
         raw_10 = canonical_phone[-10:] if len(canonical_phone) >= 10 else canonical_phone
         user = User.objects.filter(
-            Q(phone__iexact=canonical_phone) | Q(phone__endswith=raw_10)
+            Q(phone__iexact=canonical_phone) | Q(phone__endswith=raw_10) | Q(phone__icontains=raw_10)
         ).first()
+        if not user:
+            # Fallback for formatted numbers with whitespace in database
+            clean_digits = re.sub(r"[^\d]", "", canonical_phone)
+            for u in User.objects.exclude(phone="").only("id", "phone", "email", "role", "password", "google_id")[:200]:
+                u_digits = re.sub(r"[^\d]", "", u.phone)
+                if u_digits.endswith(clean_digits[-10:]):
+                    user = u
+                    break
         if user:
             return True, user
         return False, None

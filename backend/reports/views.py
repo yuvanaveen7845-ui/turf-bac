@@ -206,7 +206,40 @@ class ExportReportsCSVView(views.APIView):
         report_type = request.query_params.get("type", "bookings")
         response = HttpResponse(content_type="text/csv")
 
-        if report_type == "revenue":
+        if report_type in ["followup", "contact_list", "customer_followup"]:
+            response["Content-Disposition"] = 'attachment; filename="friends_turf_customer_followup.csv"'
+            writer = csv.writer(response)
+            # Strictly 4 columns as required: Date, Time, Who / Customer, Name
+            writer.writerow(["Date", "Time", "Who / Customer", "Name"])
+
+            qs = Booking.objects.all().select_related("customer", "turf")
+            date_filter = request.query_params.get("filter", "this_week")
+            start_date_str = request.query_params.get("start_date")
+            end_date_str = request.query_params.get("end_date")
+            today = timezone.now().date()
+
+            if start_date_str and end_date_str:
+                try:
+                    sd = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+                    ed = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+                    qs = qs.filter(date__gte=sd, date__lte=ed)
+                except ValueError:
+                    pass
+            elif date_filter == "this_week":
+                start_of_week = today - timedelta(days=today.weekday())
+                end_of_week = start_of_week + timedelta(days=6)
+                qs = qs.filter(date__gte=start_of_week, date__lte=end_of_week)
+            elif date_filter == "today":
+                qs = qs.filter(date=today)
+
+            for b in qs.order_by("date", "start_time"):
+                date_val = b.date.strftime("%Y-%m-%d")
+                time_val = f"{b.start_time.strftime('%H:%M')} - {b.end_time.strftime('%H:%M')}"
+                who_val = getattr(b.customer, "phone", "") or (b.customer.email if b.customer else "") or "N/A"
+                name_val = (b.customer.get_full_name() if b.customer else None) or (b.customer.first_name if b.customer else None) or "Walk-in Guest"
+                writer.writerow([date_val, time_val, who_val, name_val])
+
+        elif report_type == "revenue":
             response["Content-Disposition"] = 'attachment; filename="friends_turf_revenue_report.csv"'
             writer = csv.writer(response)
             writer.writerow(["Booking ID", "Customer", "Turf", "Date", "Time Slot", "Total Amount", "Discount", "Final Amount", "Paid Amount", "Balance Due", "Status"])

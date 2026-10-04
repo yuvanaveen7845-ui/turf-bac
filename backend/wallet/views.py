@@ -118,6 +118,7 @@ class WalletCreateRazorpayOrderView(views.APIView):
                 "amount": rzp_order["amount"],
                 "currency": rzp_order["currency"],
                 "key_id": rzp_order["key_id"],
+                "callback_url": rzp_order.get("callback_url") or RazorpayService.get_callback_url(),
                 "payment_id": payment.payment_id,
                 "amount_in_rupees": float(amount),
             },

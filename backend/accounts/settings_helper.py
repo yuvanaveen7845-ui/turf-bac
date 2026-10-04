@@ -20,6 +20,9 @@ DEFAULT_BUSINESS_SETTINGS = {
         "currency": "INR",
         "gstin": "33ABCDE1234F1Z5",
         "logo_url": "/logo.png",
+        "banner_title": "Friends Turf Sports Complex",
+        "banner_landmark": "RTO Backside",
+        "banner_image_url": "",
     },
     "booking": {
         "advanceBookingDays": 14,
@@ -43,8 +46,12 @@ DEFAULT_BUSINESS_SETTINGS = {
     "payments": {
         "gateway": "RAZORPAY",
         "mode": "TEST",
+        "keyId": "",
+        "keySecret": "",
+        "callbackUrl": "",
         "upiId": "friendsturf@okhdfcbank",
         "enableSplitDeposit": True,
+        "hourlyAdvanceRate": 100.0,
         "advanceDepositPercent": 50,
         "taxPercentage": 18.0,
         "isTaxIncluded": True,
@@ -114,6 +121,22 @@ class BusinessSettingsHelper:
             from django.conf import settings
             import os
             result["google_client_id"] = getattr(settings, "GOOGLE_CLIENT_ID", "") or os.getenv("GOOGLE_CLIENT_ID", "")
+
+        # Fallback dynamic retrieval for payments section
+        if section_name == "payments":
+            from django.conf import settings
+            canonical_key = getattr(settings, "RAZORPAY_KEY_ID", "")
+            if not result.get("keyId"):
+                result["keyId"] = canonical_key
+            # Legacy compatibility
+            if not result.get("testKeyId"):
+                result["testKeyId"] = canonical_key if not canonical_key.startswith("rzp_live_") else ""
+            if not result.get("liveKeyId"):
+                result["liveKeyId"] = canonical_key if canonical_key.startswith("rzp_live_") else ""
+            if not result.get("callbackUrl"):
+                result["callbackUrl"] = getattr(settings, "RAZORPAY_CALLBACK_URL", "")
+            result["isDebug"] = getattr(settings, "DEBUG", True)
+            result["activeMode"] = "LIVE" if canonical_key.startswith("rzp_live_") else ("TEST" if getattr(settings, "DEBUG", True) else "LIVE")
 
         cache.set(cache_key, result, timeout=cls.CACHE_TTL)
         return result
@@ -186,6 +209,12 @@ class BusinessSettingsHelper:
         payments = cls.get_payment_settings()
         pct = payments.get("advanceDepositPercent", 50)
         return Decimal(str(pct)) / Decimal("100.00")
+
+    @classmethod
+    def get_hourly_advance_rate(cls) -> Decimal:
+        payments = cls.get_payment_settings()
+        rate = payments.get("hourlyAdvanceRate", 100.0)
+        return Decimal(str(rate))
 
     @classmethod
     def get_checkin_open_minutes(cls) -> int:

@@ -27,7 +27,7 @@ from realtime.events import publish_event
 
 
 class PricePreviewView(views.APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         turf_id = request.data.get("turf_id")
@@ -54,6 +54,7 @@ class PricePreviewView(views.APIView):
             {"start_time": s.start_time, "end_time": s.end_time} for s in slots
         ]
 
+        active_user = request.user if request.user.is_authenticated else None
         coupon = None
         coupon_error = None
         if coupon_code:
@@ -63,7 +64,7 @@ class PricePreviewView(views.APIView):
             else:
                 # Preview coupon validity
                 valid, msg = coupon.is_valid_for_user(
-                    request.user, float(turf.base_price) * len(slots)
+                    active_user, float(turf.base_price) * len(slots)
                 )
                 if not valid:
                     coupon_error = msg
@@ -74,14 +75,14 @@ class PricePreviewView(views.APIView):
             date_obj=date_obj,
             slot_items=slot_items,
             coupon=coupon,
-            user=request.user,
+            user=active_user,
         )
         breakdown["coupon_error"] = coupon_error
         return Response(breakdown)
 
 
 class LockSlotView(views.APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         serializer = LockSlotSerializer(data=request.data)
@@ -90,12 +91,13 @@ class LockSlotView(views.APIView):
 
         data = serializer.validated_data
         turf = get_object_or_404(Turf, pk=data["turf_id"])
+        active_user = request.user if request.user.is_authenticated else None
 
         success, result = BookingEngine.lock_slots(
             turf=turf,
             date_obj=data["date"],
             slot_ids=data["slot_ids"],
-            user=request.user,
+            user=active_user,
         )
         if not success:
             return Response({"error": result}, status=status.HTTP_409_CONFLICT)
@@ -128,7 +130,7 @@ class LockSlotView(views.APIView):
 
 
 class UnlockSlotView(views.APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         serializer = LockSlotSerializer(data=request.data)
@@ -137,12 +139,13 @@ class UnlockSlotView(views.APIView):
 
         data = serializer.validated_data
         turf = get_object_or_404(Turf, pk=data["turf_id"])
+        active_user = request.user if request.user.is_authenticated else None
 
         released_count = BookingEngine.unlock_slots(
             turf=turf,
             date_obj=data["date"],
             slot_ids=data["slot_ids"],
-            user=request.user,
+            user=active_user,
         )
 
         if released_count > 0:
@@ -234,6 +237,7 @@ class BookingListCreateView(views.APIView):
                 payment_method=data.get("payment_method", "UPI"),
                 notes=data.get("notes", ""),
                 participants=data.get("participants", []),
+                advance_amount=data.get("advance_amount"),
             )
             # Broadcast booking confirmed
             publish_event(
@@ -648,4 +652,74 @@ class RecordOfflinePaymentView(views.APIView):
             )
         except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class GuestPassLookupView(views.APIView):
+    """
+    Public lookup for players who booked without signing in:
+    Allows retrieving their active/upcoming Match Passes by Booking ID (e.g. FT-26-XXXXXX)
+    or by their 10-digit mobile number.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        query = str(request.data.get("query", "")).strip()
+        if not query:
+            return Response(
+                {"error": "Please enter your Booking Reference (e.g. FT-26-...) or 10-digit Mobile Number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        clean_phone = re.sub(r"[^\d]", "", query)
+        bookings = []
+
+        # 1. If format is a Booking ID
+        if query.upper().startswith("FT-") or len(query) >= 8:
+            direct_match = Booking.objects.filter(booking_id__iexact=query).select_related("turf", "customer").prefetch_related("slots").first()
+            if direct_match:
+                bookings.append(direct_match)
+
+        # 2. If it's a mobile number (at least 10 digits)
+        if len(clean_phone) >= 10:
+            phone_matches = (
+                Booking.objects.filter(customer__phone__endswith=clean_phone[-10:])
+                .select_related("turf", "customer")
+                .prefetch_related("slots")
+                .order_by("-date", "-created_at")[:10]
+            )
+            for bm in phone_matches:
+                if bm not in bookings:
+                    bookings.append(bm)
+
+        if not bookings:
+            return Response(
+                {
+                    "message": "No match passes found matching your query. Please double-check your booking reference or phone number.",
+                    "results": [],
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        results = []
+        for b in bookings:
+            slots_list = list(b.slots.order_by("start_time"))
+            start_t = slots_list[0].start_time.strftime("%H:%M") if slots_list else (b.start_time.strftime("%H:%M") if b.start_time else "")
+            end_t = slots_list[-1].end_time.strftime("%H:%M") if slots_list else (b.end_time.strftime("%H:%M") if b.end_time else "")
+            results.append({
+                "booking_id": b.booking_id,
+                "turf_name": b.turf.name if b.turf else "Arena Ground",
+                "turf_location": b.turf.location if b.turf else "",
+                "date": str(b.date),
+                "start_time": start_t,
+                "end_time": end_t,
+                "status": b.status,
+                "amount_paid": float(b.amount_paid),
+                "balance_due": float(b.balance_due),
+                "final_amount": float(b.final_amount),
+                "customer_name": b.customer.get_full_name() or b.customer.first_name or "Player",
+                "pass_url": f"/confirmation/{b.booking_id}",
+            })
+
+        return Response({"results": results}, status=status.HTTP_200_OK)
+
 

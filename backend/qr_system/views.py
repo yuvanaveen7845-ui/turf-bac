@@ -298,13 +298,19 @@ class GetBookingPassView(views.APIView):
     """
     Retrieves the authoritative digital match pass for a booking.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request, booking_id):
         booking = get_object_or_404(Booking, booking_id=booking_id)
 
-        # Allow access to the customer who owns it, or any staff/admin
-        if request.user.role == "CUSTOMER" and booking.customer != request.user:
+        # Allow access to the customer who owns it, guests, or any staff/admin
+        if (
+            request.user.is_authenticated
+            and getattr(request.user, "role", None) == "CUSTOMER"
+            and booking.customer != request.user
+            and not getattr(booking.customer, "email", "").startswith("guest_")
+            and not getattr(booking.customer, "email", "").startswith("walkin_")
+        ):
             return Response(
                 {"error": "Unauthorized access to digital match pass."},
                 status=status.HTTP_403_FORBIDDEN,

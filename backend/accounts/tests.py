@@ -539,3 +539,87 @@ class PermanentAdminProtectionTests(TestCase):
         self.assertEqual(res["Content-Type"], "image/svg+xml")
         self.assertIn("<svg", res.content.decode("utf-8"))
 
+    def test_guest_account_claim_and_booking_preservation(self):
+        """
+        Adversarial test: Ensures an express guest booking can be claimed by the customer
+        at registration without collision errors, seamlessly keeping all prior match passes.
+        """
+        from bookings.models import Booking
+        from turfs.models import Turf
+
+        # 1. Simulate express guest user provisioned during checkout
+        guest_phone = "+91 98422 11999"
+        guest_email = "guest_9842211999_test@friendsturf.local"
+        guest_user = User.objects.create(
+            email=guest_email,
+            phone=guest_phone,
+            first_name="Guest Player",
+            role="CUSTOMER",
+        )
+        self.assertTrue(guest_user.is_unclaimed_guest())
+
+        # Create dummy booking for this guest
+        turf = Turf.objects.create(
+            name="Alpha Turf",
+            slug=f"alpha-turf-{uuid.uuid4().hex[:6]}",
+            location="Tiruppur",
+            base_price=1200,
+        )
+        booking = Booking.objects.create(
+            booking_id="FT-GUEST-9999",
+            customer=guest_user,
+            turf=turf,
+            date=timezone.now().date(),
+            start_time="18:00:00",
+            end_time="19:00:00",
+            total_amount=1200,
+            final_amount=1200,
+            amount_paid=1200,
+            balance_due=0,
+            status="CONFIRMED",
+        )
+
+        # 2. Check availability: Should NOT flag phone as unavailable
+        avail_res = self.client.get(f"/api/auth/check-availability/?field=phone&value=9842211999")
+        self.assertEqual(avail_res.status_code, status.HTTP_200_OK)
+        self.assertFalse(avail_res.data["exists"])
+        self.assertTrue(avail_res.data["is_claimable_guest"])
+
+        # 3. User registers with their real email and password
+        reg_payload = {
+            "first_name": "Ramesh",
+            "last_name": "Kumar",
+            "email": "ramesh.kumar@example.com",
+            "phone": guest_phone,
+            "password": "SecureP@ssw0rd123!",
+        }
+        reg_res = self.client.post("/api/auth/register/", reg_payload, format="json")
+        self.assertEqual(reg_res.status_code, status.HTTP_201_CREATED)
+
+        # 4. Verify account upgrade and booking retention
+        claimed_user = User.objects.get(id=guest_user.id)
+        self.assertEqual(claimed_user.email, "ramesh.kumar@example.com")
+        self.assertEqual(claimed_user.first_name, "Ramesh")
+        self.assertTrue(claimed_user.has_usable_password())
+        self.assertFalse(claimed_user.is_unclaimed_guest())
+
+        # Verify booking is STILL linked to this user
+        booking.refresh_from_db()
+        self.assertEqual(booking.customer.id, claimed_user.id)
+        self.assertEqual(booking.customer.email, "ramesh.kumar@example.com")
+
+        # 5. Subsequent registration with the claimed phone must now be blocked
+        dup_res = self.client.post(
+            "/api/auth/register/",
+            {
+                "first_name": "Imposter",
+                "email": "imposter@example.com",
+                "phone": guest_phone,
+                "password": "SecureP@ssw0rd123!",
+            },
+            format="json",
+        )
+        self.assertEqual(dup_res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("phone", dup_res.data)
+
+

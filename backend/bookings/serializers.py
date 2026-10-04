@@ -121,8 +121,11 @@ class CreateBookingSerializer(serializers.Serializer):
     )
     coupon_code = serializers.CharField(required=False, allow_blank=True)
     payment_type = serializers.ChoiceField(
-        choices=[("FULL", "Full"), ("PARTIAL", "Partial"), ("PENDING", "Pending")],
+        choices=[("FULL", "Full"), ("PARTIAL", "Partial"), ("ADVANCE", "Advance"), ("PENDING", "Pending")],
         default="FULL",
+    )
+    advance_amount = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
     )
     payment_method = serializers.ChoiceField(
         choices=[

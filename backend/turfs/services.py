@@ -209,12 +209,24 @@ class SchedulingEngine:
             slot_state = "COMPLETED" if slot.status == "BOOKED" else "PAST"
         elif is_ongoing:
             slot_state = "ONGOING"
-        elif slot.status in ("BOOKED", "MAINTENANCE"):
+        elif slot.status in ("BOOKED", "MAINTENANCE", "BLOCKED"):
             slot_state = slot.status
         elif slot.status == "LOCKED" and not is_lock_expired:
             slot_state = "LOCKED"
         else:
             slot_state = "AVAILABLE"
+
+        # 4-State Schedule indicator: AVAILABLE (Green), BOOKED (Red), BLOCKED (Slate), LOCKED (Amber)
+        if slot.status in ("MAINTENANCE", "BLOCKED"):
+            schedule_state = "BLOCKED"
+        elif slot.status == "BOOKED":
+            schedule_state = "BOOKED"
+        elif slot.status == "LOCKED" and not is_lock_expired:
+            schedule_state = "LOCKED"
+        elif is_available:
+            schedule_state = "AVAILABLE"
+        else:
+            schedule_state = slot.status
 
         slot_dict = {
             "id": str(slot.id),
@@ -223,6 +235,7 @@ class SchedulingEngine:
             "start_time": slot.start_time.strftime("%H:%M:%S") if hasattr(slot.start_time, "strftime") else str(slot.start_time),
             "end_time": slot.end_time.strftime("%H:%M:%S") if hasattr(slot.end_time, "strftime") else str(slot.end_time),
             "status": slot.status,
+            "schedule_state": schedule_state,
             "price": price_info["slot_price"],
             "base_price": price_info["base_price"],
             "applied_rules": price_info["applied_rules"],

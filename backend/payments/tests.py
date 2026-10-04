@@ -456,3 +456,181 @@ class PaymentEngineComprehensiveTests(TestCase):
         summary = drawer.get_summary()
         self.assertEqual(summary["opening_cash"], 5000.0)
         self.assertIn("expected_closing", summary)
+
+    # -------------------------------------------------------------
+    # 7. EXPRESS GUEST CHECKOUT (UNAUTHENTICATED)
+    # -------------------------------------------------------------
+    def test_guest_checkout_order_creation_and_pass(self):
+        """Verifies an unauthenticated visitor can lock a slot, create Razorpay order, verify payment, and get match pass."""
+        guest_client = APIClient()  # No force_authenticate
+        target_slot = self.slots[4]
+
+        # 1. Guest locks slot
+        lock_res = guest_client.post("/api/bookings/lock/", {
+            "turf_id": self.turf.id,
+            "date": str(self.today),
+            "slot_ids": [target_slot.id],
+        }, format="json")
+        self.assertEqual(lock_res.status_code, 200)
+
+        # 2. Guest creates order
+        with patch.object(RazorpayService, "create_order", return_value={"order_id": "order_guest_999", "amount": 120000, "currency": "INR", "key_id": "rzp_test_key"}):
+            order_res = guest_client.post("/api/payments/razorpay/create-order/", {
+                "turf_id": self.turf.id,
+                "date": str(self.today),
+                "slot_ids": [target_slot.id],
+                "payment_type": "FULL",
+                "customer_name": "Karthik Striker",
+                "customer_phone": "9842211223",
+                "customer_email": "karthik@gmail.com",
+            }, format="json")
+            self.assertEqual(order_res.status_code, 201)
+            order_data = order_res.json()
+            booking_id = order_data["booking_id"]
+
+        # Check guest customer was created
+        guest_user = User.objects.filter(phone__endswith="9842211223").first()
+        self.assertIsNotNone(guest_user)
+        self.assertEqual(guest_user.role, "CUSTOMER")
+        self.assertIn("Karthik Striker", guest_user.get_full_name())
+
+        # 3. Guest verifies payment
+        with patch.object(RazorpayService, "verify_payment_signature", return_value=True):
+            verify_res = guest_client.post("/api/payments/razorpay/verify/", {
+                "razorpay_order_id": "order_guest_999",
+                "razorpay_payment_id": "pay_guest_777",
+                "razorpay_signature": "valid_signature",
+                "booking_id": booking_id,
+            }, format="json")
+            self.assertEqual(verify_res.status_code, 200)
+
+        # 4. Guest retrieves match pass without authentication
+        pass_res = guest_client.get(f"/api/qr/pass/{booking_id}/")
+        self.assertEqual(pass_res.status_code, 200)
+        pass_data = pass_res.json()
+        self.assertEqual(pass_data["booking_id"], booking_id)
+        self.assertEqual(pass_data["status"], "ACTIVE")
+        self.assertEqual(pass_data["booking_status"], "CONFIRMED")
+        self.assertEqual(pass_data["payment_status"], "PAID")
+        self.assertIn("9842211223", pass_data["customer_phone"])
+
+        # 5. Guest looks up match pass by 10-digit mobile number
+        lookup_phone_res = guest_client.post("/api/bookings/lookup/", {
+            "query": "9842211223",
+        }, format="json")
+        self.assertEqual(lookup_phone_res.status_code, 200)
+        phone_results = lookup_phone_res.json().get("results", [])
+        self.assertTrue(len(phone_results) >= 1)
+        self.assertEqual(phone_results[0]["booking_id"], booking_id)
+
+        # 6. Guest looks up match pass by Booking ID
+        lookup_id_res = guest_client.post("/api/bookings/lookup/", {
+            "query": booking_id,
+        }, format="json")
+        self.assertEqual(lookup_id_res.status_code, 200)
+        id_results = lookup_id_res.json().get("results", [])
+        self.assertEqual(len(id_results), 1)
+        self.assertEqual(id_results[0]["booking_id"], booking_id)
+
+        # 7. Guest accesses tax invoice receipt without authentication
+        receipt_res = guest_client.get(f"/api/payments/{booking_id}/receipt/")
+        self.assertEqual(receipt_res.status_code, 200)
+        self.assertIn("receipt_number", receipt_res.json())
+
+    def test_guest_partial_advance_and_balance_settlement(self):
+        """Verifies a guest can pay an advance deposit, retrieve partial pass, and settle remaining balance without login."""
+        guest_client = APIClient()
+        target_slot = self.slots[5]
+
+        # 1. Lock slot
+        guest_client.post("/api/bookings/lock/", {
+            "turf_id": self.turf.id,
+            "date": str(self.today),
+            "slot_ids": [target_slot.id],
+        }, format="json")
+
+        # 2. Create partial advance order (₹200 deposit)
+        with patch.object(RazorpayService, "create_order", return_value={"order_id": "order_advance_111", "amount": 20000, "currency": "INR", "key_id": "rzp_test_key"}):
+            order_res = guest_client.post("/api/payments/razorpay/create-order/", {
+                "turf_id": self.turf.id,
+                "date": str(self.today),
+                "slot_ids": [target_slot.id],
+                "payment_type": "PARTIAL",
+                "advance_amount": 200,
+                "customer_name": "Rahman Midfielder",
+                "customer_phone": "9842299887",
+            }, format="json")
+            self.assertEqual(order_res.status_code, 201)
+            booking_id = order_res.json()["booking_id"]
+
+        # 3. Verify advance payment
+        with patch.object(RazorpayService, "verify_payment_signature", return_value=True):
+            verify_res = guest_client.post("/api/payments/razorpay/verify/", {
+                "razorpay_order_id": "order_advance_111",
+                "razorpay_payment_id": "pay_advance_222",
+                "razorpay_signature": "sig_adv",
+                "booking_id": booking_id,
+            }, format="json")
+            self.assertEqual(verify_res.status_code, 200)
+
+        # 4. Check partial pass state
+        pass_res = guest_client.get(f"/api/qr/pass/{booking_id}/")
+        self.assertEqual(pass_res.status_code, 200)
+        pass_data = pass_res.json()
+        self.assertEqual(pass_data["status"], "DEPOSIT_CONFIRMED")
+        self.assertEqual(pass_data["payment_status"], "PARTIAL")
+        self.assertEqual(pass_data["amount_paid"], 200.0)
+        self.assertEqual(pass_data["balance_due"], 1000.0)
+
+        # 5. Guest clears remaining balance (₹1,000) online without login
+        with patch.object(RazorpayService, "create_order", return_value={"order_id": "order_bal_333", "amount": 100000, "currency": "INR", "key_id": "rzp_test_key"}):
+            bal_order_res = guest_client.post("/api/payments/razorpay/pay-balance/", {
+                "booking_id": booking_id,
+            }, format="json")
+            self.assertEqual(bal_order_res.status_code, 201)
+
+        # 6. Verify balance payment
+        with patch.object(RazorpayService, "verify_payment_signature", return_value=True):
+            bal_verify_res = guest_client.post("/api/payments/razorpay/verify-balance/", {
+                "razorpay_order_id": "order_bal_333",
+                "razorpay_payment_id": "pay_bal_444",
+                "razorpay_signature": "sig_bal",
+                "booking_id": booking_id,
+            }, format="json")
+            self.assertEqual(bal_verify_res.status_code, 200)
+
+        # 7. Match pass is now 100% PAID and ACTIVE
+        pass_res_final = guest_client.get(f"/api/qr/pass/{booking_id}/")
+        self.assertEqual(pass_res_final.status_code, 200)
+        final_pass_data = pass_res_final.json()
+        self.assertEqual(final_pass_data["status"], "ACTIVE")
+        self.assertEqual(final_pass_data["payment_status"], "PAID")
+        self.assertEqual(final_pass_data["balance_due"], 0.0)
+        self.assertEqual(final_pass_data["amount_paid"], 1200.0)
+
+        # 8. Attempting to pay balance when balance is 0 fails with 400
+        zero_bal_res = guest_client.post("/api/payments/razorpay/pay-balance/", {
+            "booking_id": booking_id,
+        }, format="json")
+        self.assertEqual(zero_bal_res.status_code, 400)
+        self.assertIn("no outstanding balance", zero_bal_res.data["error"])
+
+        # 9. Guest retrieves official branded tax receipt without login
+        receipt_res = guest_client.get(f"/api/payments/{booking_id}/receipt/")
+        self.assertEqual(receipt_res.status_code, 200)
+        self.assertEqual(receipt_res.data["booking"]["booking_id"], booking_id)
+        self.assertIn("receipt_number", receipt_res.data)
+
+        # 10. Attempting to pay balance on a CANCELLED booking fails with 400
+        booking = Booking.objects.get(booking_id=booking_id)
+        booking.status = "CANCELLED"
+        booking.balance_due = Decimal("500.00")
+        booking.save()
+        cancelled_pay_res = guest_client.post("/api/payments/razorpay/pay-balance/", {
+            "booking_id": booking_id,
+        }, format="json")
+        self.assertEqual(cancelled_pay_res.status_code, 400)
+        self.assertIn("CANCELLED", cancelled_pay_res.data["error"])
+
+
+

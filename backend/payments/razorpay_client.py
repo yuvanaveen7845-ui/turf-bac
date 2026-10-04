@@ -11,6 +11,8 @@ class RazorpayService:
     """
     Razorpay Server Integration Service.
     Handles order generation, HMAC-SHA256 signature verification, webhook validation, and refunds.
+    Strictly separates test and live API keys, and isolates local and live callbacks,
+    identified by DEBUG mode in .env with explicit overrides.
     """
 
     @classmethod
@@ -22,22 +24,108 @@ class RazorpayService:
             return {}
 
     @classmethod
+    def get_mode(cls):
+        """
+        Determines active gateway environment: 'TEST' or 'LIVE'.
+        Automatically detected from active key prefix (rzp_live_ vs rzp_test_),
+        with fallback to setting or DEBUG.
+        """
+        db_mode = cls.get_payment_settings().get("mode")
+        if db_mode in ("TEST", "LIVE", "SANDBOX"):
+            return db_mode
+
+        key_id = cls.get_key_id()
+        if key_id.startswith("rzp_live_"):
+            return "LIVE"
+        elif key_id.startswith("rzp_test_"):
+            return "TEST"
+
+        return getattr(settings, "RAZORPAY_MODE", "TEST" if getattr(settings, "DEBUG", True) else "LIVE")
+
+    @classmethod
+    def is_live_mode(cls):
+        return cls.get_mode() == "LIVE"
+
+    @classmethod
     def get_key_id(cls):
-        custom_key = cls.get_payment_settings().get("keyId")
+        """
+        Retrieves the Razorpay Key ID for the current isolated environment.
+        """
+        payment_settings = cls.get_payment_settings()
+        # Direct key ID from DB override or legacy mode-specific keys
+        custom_key = (
+            payment_settings.get("keyId")
+            or payment_settings.get("testKeyId")
+            or payment_settings.get("liveKeyId")
+        )
         if custom_key:
             return custom_key.strip()
-        return getattr(settings, "RAZORPAY_KEY_ID", "")
+        
+        resolved_key = getattr(settings, "RAZORPAY_KEY_ID", "").strip()
+
+        # Safety Alert: Prevent accidental live transactions in DEBUG local mode
+        if getattr(settings, "DEBUG", False) and resolved_key.startswith("rzp_live_"):
+            logger.warning(
+                "SAFETY INTERLOCK NOTICE: Running with DEBUG=True while using a LIVE Razorpay Key (%s).",
+                resolved_key[:12] + "...",
+            )
+
+        return resolved_key
 
     @classmethod
     def get_key_secret(cls):
-        custom_secret = cls.get_payment_settings().get("keySecret")
+        """
+        Retrieves the Razorpay Key Secret for HMAC verification.
+        """
+        payment_settings = cls.get_payment_settings()
+        custom_secret = (
+            payment_settings.get("keySecret")
+            or payment_settings.get("testKeySecret")
+            or payment_settings.get("liveKeySecret")
+        )
         if custom_secret and "•••" not in custom_secret:
             return custom_secret.strip()
-        return getattr(settings, "RAZORPAY_KEY_SECRET", "")
+
+        return getattr(settings, "RAZORPAY_KEY_SECRET", "").strip()
 
     @classmethod
     def get_webhook_secret(cls):
-        return getattr(settings, "RAZORPAY_WEBHOOK_SECRET", "")
+        return getattr(settings, "RAZORPAY_WEBHOOK_SECRET", "").strip()
+
+    @classmethod
+    def get_callback_url(cls):
+        """
+        Returns the authoritative Razorpay Gateway HTTP callback endpoint.
+        Always bound to the active backend instance (Local vs Render Production).
+        """
+        payment_settings = cls.get_payment_settings()
+        custom_callback = (
+            payment_settings.get("callbackUrl")
+            or payment_settings.get("localCallbackUrl")
+            or payment_settings.get("liveCallbackUrl")
+        )
+        if custom_callback:
+            return custom_callback.strip()
+
+        backend_url = getattr(
+            settings,
+            "BACKEND_URL",
+            "http://localhost:8000" if getattr(settings, "DEBUG", True) else "https://turf-bac.onrender.com"
+        ).rstrip("/")
+
+        return getattr(settings, "RAZORPAY_CALLBACK_URL", f"{backend_url}/api/payments/razorpay/callback/").strip()
+
+    @classmethod
+    def get_frontend_url(cls):
+        """
+        Returns the frontend application base URL for post-payment redirects.
+        """
+        return getattr(
+            settings,
+            "FRONTEND_URL",
+            "http://localhost:5173" if getattr(settings, "DEBUG", True) else "https://friendsturf.in"
+        ).rstrip("/")
+
 
     @classmethod
     def get_client(cls):
@@ -54,6 +142,7 @@ class RazorpayService:
         amount_paise = int(round(float(amount_in_rupees) * 100))
         key_id = cls.get_key_id()
         key_secret = cls.get_key_secret()
+        callback_url = cls.get_callback_url()
 
         client = cls.get_client()
         order_payload = {
@@ -64,7 +153,7 @@ class RazorpayService:
             "payment_capture": 1,
         }
 
-        mode = cls.get_payment_settings().get("mode", "TEST")
+        mode = cls.get_mode()
 
         # Check if explicitly running in sandbox/simulation mode or with dummy placeholder keys
         is_placeholder_key = (
@@ -87,6 +176,7 @@ class RazorpayService:
                 "amount": amount_paise,
                 "currency": currency,
                 "key_id": key_id or "rzp_test_FriendsTurfKey",
+                "callback_url": callback_url,
                 "is_sandbox": True,
             }
 
@@ -97,6 +187,7 @@ class RazorpayService:
                 "amount": order["amount"],
                 "currency": order["currency"],
                 "key_id": key_id,
+                "callback_url": callback_url,
                 "is_sandbox": False,
             }
         except Exception as e:
@@ -108,6 +199,7 @@ class RazorpayService:
                 "amount": amount_paise,
                 "currency": currency,
                 "key_id": key_id or "rzp_test_FriendsTurfKey",
+                "callback_url": callback_url,
                 "is_sandbox": True,
             }
 

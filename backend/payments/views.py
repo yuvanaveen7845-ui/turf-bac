@@ -1,3 +1,4 @@
+import re
 import csv
 import json
 import uuid
@@ -30,6 +31,7 @@ from notifications.models import Notification
 from notifications.services import EmailNotificationService
 from wallet.models import WalletTransaction
 from audit.models import AuditLog
+from accounts.models import User
 from accounts.permissions import (
     IsAdmin,
     IsManager,
@@ -49,7 +51,7 @@ class CreateRazorpayOrderView(views.APIView):
     - Creates Booking in PAYMENT_PENDING status (or reuses existing held booking)
     - Creates Razorpay Order & Payment record in PENDING status
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         turf_id = request.data.get("turf_id")
@@ -59,6 +61,66 @@ class CreateRazorpayOrderView(views.APIView):
         payment_type = request.data.get("payment_type", "FULL")
         notes = request.data.get("notes", "")
         participants = request.data.get("participants", [])
+
+        if request.user.is_authenticated:
+            payer_user = request.user
+        else:
+            customer_name = request.data.get("customer_name", "").strip()
+            customer_phone = request.data.get("customer_phone", "").strip()
+            customer_email = request.data.get("customer_email", "").strip()
+
+            clean_digits = re.sub(r"[^\d]", "", customer_phone)
+            # Normalize 10-digit Indian mobile number from +91 or 0 prefix
+            if clean_digits.startswith("91") and len(clean_digits) == 12:
+                clean_digits = clean_digits[2:]
+            elif clean_digits.startswith("0") and len(clean_digits) == 11:
+                clean_digits = clean_digits[1:]
+
+            if not re.match(r"^[6-9]\d{9}$", clean_digits):
+                return Response(
+                    {
+                        "error": "Please provide a valid 10-digit Indian mobile number (must be 10 digits starting with 6, 7, 8, or 9).",
+                        "code": "INVALID_PHONE_NUMBER",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            clean_name = re.sub(r"\s+", " ", customer_name).strip()
+            if not clean_name or len(clean_name) < 2:
+                return Response(
+                    {
+                        "error": "Please provide a valid player or team name (minimum 2 characters).",
+                        "code": "INVALID_CUSTOMER_NAME",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if customer_email:
+                if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", customer_email):
+                    return Response(
+                        {
+                            "error": "Please provide a valid email address (e.g. vignesh@gmail.com) or leave it blank.",
+                            "code": "INVALID_EMAIL",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            payer_user = (
+                User.objects.filter(phone=clean_digits).first()
+                or User.objects.filter(phone=f"+91{clean_digits}").first()
+                or User.objects.filter(phone=customer_phone).first()
+            )
+            if not payer_user:
+                email = customer_email or f"guest_{clean_digits}_{uuid.uuid4().hex[:4]}@friendsturf.local"
+                payer_user = User.objects.create(
+                    email=email,
+                    first_name=clean_name,
+                    phone=clean_digits,
+                    role="CUSTOMER",
+                )
+            elif clean_name and payer_user.first_name in ("Guest Player", "Walk-in Guest", ""):
+                payer_user.first_name = clean_name
+                payer_user.save()
 
         if not BusinessSettingsHelper.is_feature_enabled("ONLINE_PAYMENTS"):
             return Response(
@@ -135,7 +197,7 @@ class CreateRazorpayOrderView(views.APIView):
                 if slot.status == "BOOKED":
                     # Check if this slot was already confirmed by the current user
                     existing_booking = Booking.objects.filter(
-                        customer=request.user,
+                        customer=payer_user,
                         slots=slot,
                         status__in=["CONFIRMED", "CHECKED_IN", "IN_PROGRESS", "COMPLETED"],
                     ).first()
@@ -164,24 +226,30 @@ class CreateRazorpayOrderView(views.APIView):
                         },
                         status=status.HTTP_409_CONFLICT,
                     )
-                if (
-                    slot.status == "LOCKED"
-                    and not slot.is_lock_expired()
-                    and slot.locked_by != request.user
-                ):
-                    return Response(
-                        {
-                            "error": f"Slot {slot.start_time.strftime('%I:%M %p')} is currently held by another user.",
-                            "code": "SLOT_LOCKED_BY_OTHER",
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
+                if slot.status == "LOCKED" and not slot.is_lock_expired():
+                    if slot.locked_by is not None:
+                        if payer_user and slot.locked_by != payer_user:
+                            return Response(
+                                {
+                                    "error": f"Slot {slot.start_time.strftime('%I:%M %p')} is currently held by another user.",
+                                    "code": "SLOT_LOCKED_BY_OTHER",
+                                },
+                                status=status.HTTP_409_CONFLICT,
+                            )
+                        elif not payer_user and request.user.is_authenticated and slot.locked_by != request.user:
+                            return Response(
+                                {
+                                    "error": f"Slot {slot.start_time.strftime('%I:%M %p')} is currently held by another user.",
+                                    "code": "SLOT_LOCKED_BY_OTHER",
+                                },
+                                status=status.HTTP_409_CONFLICT,
+                            )
 
             # Apply 5-minute lock on slots
             for slot in slots:
                 slot.status = "LOCKED"
                 slot.locked_until = lock_until
-                slot.locked_by = request.user
+                slot.locked_by = payer_user
                 slot.save()
 
             # Compute accurate server-side pricing
@@ -195,20 +263,47 @@ class CreateRazorpayOrderView(views.APIView):
                 date_obj=date_obj,
                 slot_items=slot_items,
                 coupon=coupon,
-                user=request.user,
+                user=payer_user,
             )
 
             final_amt = Decimal(str(price_data["final_amount"]))
             if payment_type == "FULL":
                 amount_to_charge = final_amt
             else:
-                deposit_fraction = BusinessSettingsHelper.get_advance_deposit_fraction()
-                amount_to_charge = round(final_amt * deposit_fraction, 2)
+                hourly_rate = BusinessSettingsHelper.get_hourly_advance_rate()
+                total_duration_minutes = sum(
+                    int((timezone.datetime.combine(date_obj, s.end_time) - timezone.datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                    for s in slots
+                )
+                duration_hours = Decimal(str(total_duration_minutes)) / Decimal("60.0")
+                minimum_advance = round(duration_hours * hourly_rate, 2)
+                effective_min_advance = min(minimum_advance, final_amt)
+                raw_advance = request.data.get("advance_amount")
+                if raw_advance is not None:
+                    try:
+                        custom_advance = Decimal(str(raw_advance))
+                    except Exception:
+                        custom_advance = effective_min_advance
+                else:
+                    custom_advance = effective_min_advance
+
+                if custom_advance < effective_min_advance:
+                    return Response(
+                        {
+                            "error": f"Minimum advance required is ₹{effective_min_advance} ({duration_hours} hr × ₹{hourly_rate}/hr).",
+                            "minimum_advance": float(effective_min_advance),
+                            "duration_hours": float(duration_hours),
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if custom_advance > final_amt:
+                    custom_advance = final_amt
+                amount_to_charge = custom_advance
 
             booking_id = Booking.generate_booking_id(date_obj)
             booking = Booking.objects.create(
                 booking_id=booking_id,
-                customer=request.user,
+                customer=payer_user,
                 turf=turf,
                 date=date_obj,
                 start_time=slots[0].start_time,
@@ -240,7 +335,7 @@ class CreateRazorpayOrderView(views.APIView):
                 receipt_id=booking.booking_id,
                 notes={
                     "booking_id": booking.booking_id,
-                    "customer_id": str(request.user.id),
+                    "customer_id": str(payer_user.id),
                     "turf_name": turf.name,
                 },
             )
@@ -260,7 +355,7 @@ class CreateRazorpayOrderView(views.APIView):
         payment = Payment.objects.create(
             payment_id=payment_id,
             booking=booking,
-            customer=request.user,
+            customer=payer_user,
             provider="RAZORPAY",
             provider_order_id=rzp_order["order_id"],
             amount=amount_to_charge,
@@ -272,7 +367,7 @@ class CreateRazorpayOrderView(views.APIView):
         )
 
         AuditLog.objects.create(
-            user=request.user,
+            user=request.user if request.user.is_authenticated else payer_user,
             action="PAYMENT_ORDER_CREATED",
             resource_type="PAYMENT",
             resource_id=payment.payment_id,
@@ -289,6 +384,7 @@ class CreateRazorpayOrderView(views.APIView):
                 "amount": rzp_order["amount"],
                 "currency": rzp_order["currency"],
                 "key_id": rzp_order["key_id"],
+                "callback_url": rzp_order.get("callback_url") or RazorpayService.get_callback_url(),
                 "booking_id": booking.booking_id,
                 "amount_to_pay": float(amount_to_charge),
                 "final_amount": float(booking.final_amount),
@@ -308,7 +404,7 @@ class VerifyRazorpayPaymentView(views.APIView):
     - Generates QR ticket pass & sends notification
     - Enforces idempotency against duplicate verification requests
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     @transaction.atomic
     def post(self, request):
@@ -324,7 +420,13 @@ class VerifyRazorpayPaymentView(views.APIView):
             )
 
         booking = get_object_or_404(Booking, booking_id=booking_id)
-        if request.user.role == "CUSTOMER" and booking.customer != request.user:
+        if (
+            request.user.is_authenticated
+            and getattr(request.user, "role", None) == "CUSTOMER"
+            and booking.customer != request.user
+            and not getattr(booking.customer, "email", "").startswith("guest_")
+            and not getattr(booking.customer, "email", "").startswith("walkin_")
+        ):
             return Response(
                 {"error": "Unauthorized access to this booking."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -523,7 +625,7 @@ class CreateBalanceRazorpayOrderView(views.APIView):
     """
     Creates a Razorpay Order specifically for clearing the remaining balance due on a booking.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         booking_id = request.data.get("booking_id")
@@ -534,10 +636,21 @@ class CreateBalanceRazorpayOrderView(views.APIView):
             )
 
         booking = get_object_or_404(Booking, booking_id=booking_id)
-        if request.user.role == "CUSTOMER" and booking.customer != request.user:
+        if (
+            request.user.is_authenticated
+            and getattr(request.user, "role", None) == "CUSTOMER"
+            and booking.customer != request.user
+            and not getattr(booking.customer, "is_unclaimed_guest", lambda: False)()
+        ):
             return Response(
                 {"error": "Unauthorized access to this booking."},
                 status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if booking.status in ("CANCELLED", "EXPIRED", "REFUNDED"):
+            return Response(
+                {"error": f"Cannot pay balance for a booking that is {booking.status}."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if booking.balance_due <= Decimal("0.00"):
@@ -549,6 +662,8 @@ class CreateBalanceRazorpayOrderView(views.APIView):
         amount_to_charge = booking.balance_due
         receipt_id = f"BAL-{booking.booking_id[-8:]}"
 
+        payer_user = request.user if request.user.is_authenticated else booking.customer
+
         try:
             rzp_order = RazorpayService.create_order(
                 amount_in_rupees=amount_to_charge,
@@ -556,7 +671,7 @@ class CreateBalanceRazorpayOrderView(views.APIView):
                 notes={
                     "type": "BALANCE_PAYMENT",
                     "booking_id": booking.booking_id,
-                    "customer_id": str(request.user.id),
+                    "customer_id": str(payer_user.id) if payer_user else "",
                     "turf_name": booking.turf.name,
                 },
             )
@@ -572,7 +687,7 @@ class CreateBalanceRazorpayOrderView(views.APIView):
         payment = Payment.objects.create(
             payment_id=payment_id,
             booking=booking,
-            customer=request.user,
+            customer=payer_user,
             provider="RAZORPAY",
             provider_order_id=rzp_order["order_id"],
             amount=amount_to_charge,
@@ -585,7 +700,7 @@ class CreateBalanceRazorpayOrderView(views.APIView):
         )
 
         AuditLog.objects.create(
-            user=request.user,
+            user=payer_user,
             action="BALANCE_ORDER_CREATED",
             resource_type="PAYMENT",
             resource_id=payment.payment_id,
@@ -602,6 +717,7 @@ class CreateBalanceRazorpayOrderView(views.APIView):
                 "amount": rzp_order["amount"],
                 "currency": rzp_order["currency"],
                 "key_id": rzp_order["key_id"],
+                "callback_url": rzp_order.get("callback_url") or RazorpayService.get_callback_url(),
                 "booking_id": booking.booking_id,
                 "amount_to_pay": float(amount_to_charge),
                 "balance_due": float(booking.balance_due),
@@ -615,7 +731,7 @@ class VerifyBalanceRazorpayPaymentView(views.APIView):
     """
     Verifies Razorpay payment for remaining balance and settles booking balance to zero.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     @transaction.atomic
     def post(self, request):
@@ -637,7 +753,12 @@ class VerifyBalanceRazorpayPaymentView(views.APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        if request.user.role == "CUSTOMER" and booking.customer != request.user:
+        if (
+            request.user.is_authenticated
+            and getattr(request.user, "role", None) == "CUSTOMER"
+            and booking.customer != request.user
+            and not getattr(booking.customer, "is_unclaimed_guest", lambda: False)()
+        ):
             return Response(
                 {"error": "Unauthorized access to this booking."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -704,7 +825,7 @@ class VerifyBalanceRazorpayPaymentView(views.APIView):
         )
 
         AuditLog.objects.create(
-            user=request.user,
+            user=request.user if request.user.is_authenticated else booking.customer,
             action="BALANCE_PAYMENT_VERIFIED",
             resource_type="PAYMENT",
             resource_id=payment.payment_id,
@@ -760,14 +881,26 @@ class RazorpayCallbackView(views.APIView):
         error_code = data.get("error[code]") or data.get("error_code")
         error_description = data.get("error[description]") or data.get("error_description")
         # Strict origin validation to guarantee customer is only redirected to our trusted website
-        frontend_url = getattr(settings, "FRONTEND_URL", "https://friendsturf.in").rstrip("/")
+        default_frontend_url = RazorpayService.get_frontend_url()
+        frontend_url = default_frontend_url
         req_origin = request.headers.get("Origin") or request.headers.get("Referer") or ""
-        trusted_domains = ["https://friendsturf.in", "https://www.friendsturf.in", "https://turf-fron.pages.dev"]
+        trusted_domains = [
+            getattr(settings, "FRONTEND_URL_LIVE", "https://friendsturf.in"),
+            "https://friendsturf.in",
+            "https://www.friendsturf.in",
+            "https://turf-fron.pages.dev",
+        ]
         if getattr(settings, "DEBUG", False):
-            trusted_domains.extend(["http://localhost:5173", "http://localhost:5174", "http://127.0.0.1:5173", "http://127.0.0.1:5174"])
+            trusted_domains.extend([
+                getattr(settings, "FRONTEND_URL_LOCAL", "http://localhost:5173"),
+                "http://localhost:5173",
+                "http://localhost:5174",
+                "http://127.0.0.1:5173",
+                "http://127.0.0.1:5174",
+            ])
         for td in trusted_domains:
-            if req_origin.startswith(td):
-                frontend_url = td
+            if td and req_origin.startswith(td.rstrip("/")):
+                frontend_url = td.rstrip("/")
                 break
 
         if error_code or not razorpay_payment_id or not razorpay_order_id:
@@ -776,7 +909,7 @@ class RazorpayCallbackView(views.APIView):
                 return HttpResponseRedirect(
                     f"{frontend_url}/payment-callback?razorpay_order_id={razorpay_order_id}&error_code={error_code or 'FAILED'}&error_description={error_description or 'Payment failed'}"
                 )
-            return HttpResponseRedirect(f"{frontend_url}/my-bookings?payment_status=failed")
+            return HttpResponseRedirect(f"{frontend_url}/checkout?error=PaymentFailed")
 
         # 1. Locate payment record
         payment = Payment.objects.filter(provider_order_id=razorpay_order_id).first()
@@ -1839,14 +1972,19 @@ class ReceiptDetailView(views.APIView):
     Returns official branded human-friendly digital receipt.
     Works by payment_id or booking_id.
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request, identifier):
         # 1. Check if identifier is payment_id
         payment = Payment.objects.filter(payment_id=identifier).select_related("booking", "customer").first()
         if payment:
             # Check ownership
-            if request.user.role == "CUSTOMER" and payment.customer != request.user:
+            if (
+                request.user.is_authenticated
+                and getattr(request.user, "role", None) == "CUSTOMER"
+                and payment.customer != request.user
+                and not getattr(payment.customer, "is_unclaimed_guest", lambda: False)()
+            ):
                 return Response({"error": "Unauthorized access."}, status=status.HTTP_403_FORBIDDEN)
             receipt = ReceiptGenerator.generate_receipt_for_payment(payment)
             return Response(receipt)
@@ -1854,7 +1992,12 @@ class ReceiptDetailView(views.APIView):
         # 2. Check if identifier is booking_id
         booking = Booking.objects.filter(booking_id=identifier).select_related("turf", "customer").first()
         if booking:
-            if request.user.role == "CUSTOMER" and booking.customer != request.user:
+            if (
+                request.user.is_authenticated
+                and getattr(request.user, "role", None) == "CUSTOMER"
+                and booking.customer != request.user
+                and not getattr(booking.customer, "is_unclaimed_guest", lambda: False)()
+            ):
                 return Response({"error": "Unauthorized access."}, status=status.HTTP_403_FORBIDDEN)
             receipt = ReceiptGenerator.generate_receipt_for_booking(booking)
             return Response(receipt)

@@ -209,29 +209,25 @@ class RazorpayService:
     ):
         """
         Cryptographically verifies the Razorpay payment signature via HMAC-SHA256.
-        In development/mock mode, verifies mock signatures.
+        In development/mock mode, verifies explicit mock signatures.
         """
-        if not razorpay_order_id or not razorpay_payment_id:
+        if not razorpay_order_id or not razorpay_payment_id or not razorpay_signature:
             return False
 
-        # Support mock test orders and in-app verified signatures
+        # Support explicit mock test orders and mock signatures
         if (
             str(razorpay_order_id).startswith("order_mock_")
             or str(razorpay_order_id).startswith("mock_")
             or razorpay_signature == "mock_signature_verified"
             or str(razorpay_signature).startswith("mock_")
             or str(razorpay_signature).startswith("ft_")
-            or cls.get_key_id() == "rzp_test_FriendsTurfKey"
-            or not cls.get_key_id()
-            or cls.get_key_secret() == "razorpay_test_secret_key"
-            or not cls.get_key_secret()
         ):
             return True
 
-        if not razorpay_signature:
+        key_secret = cls.get_key_secret()
+        if not key_secret:
             return False
 
-        key_secret = cls.get_key_secret()
         msg = f"{razorpay_order_id}|{razorpay_payment_id}"
 
         generated_signature = hmac.new(

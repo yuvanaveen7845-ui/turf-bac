@@ -483,47 +483,93 @@ class Command(BaseCommand):
         # 8. Create Realistic Demo Bookings
         # Booking 1: Upcoming Confirmed Booking for today evening with QR code
         if len(turf_objs) > 0:
-            slot_today_1 = TimeSlot.objects.filter(
-                turf=turf_objs[0], date=today, start_time=time(19, 0)
-            ).first()
-            if slot_today_1 and slot_today_1.status != "BOOKED":
-                b1 = BookingEngine.create_booking(
-                    turf=turf_objs[0],
-                    date_obj=today,
-                    slot_ids=[str(slot_today_1.id)],
-                    user=customer_user,
-                    payment_type="FULL",
-                    payment_method="UPI",
-                    notes="Friends 7v7 friendly match. Need size 5 football.",
+            try:
+                candidate_slots = list(
+                    TimeSlot.objects.filter(
+                        turf=turf_objs[0], date=today, start_time__gte=time(19, 0), status="AVAILABLE"
+                    ).order_by("start_time")
                 )
-                self.stdout.write(
-                    self.style.SUCCESS(
-                        f"Created Booking 1: {b1.booking_id} (CONFIRMED for Today 19:00)"
+                selected_slots_1 = []
+                acc_mins_1 = 0
+                for s in candidate_slots:
+                    if not selected_slots_1 or selected_slots_1[-1].end_time == s.start_time:
+                        selected_slots_1.append(s)
+                        dur = int(
+                            (
+                                datetime.combine(today + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                                - datetime.combine(today, s.start_time)
+                            ).total_seconds()
+                            / 60
+                        )
+                        acc_mins_1 += dur
+                        if acc_mins_1 >= 60:
+                            break
+                    else:
+                        break
+
+                if selected_slots_1 and acc_mins_1 >= 60:
+                    b1 = BookingEngine.create_booking(
+                        turf=turf_objs[0],
+                        date_obj=today,
+                        slot_ids=[str(s.id) for s in selected_slots_1],
+                        user=customer_user,
+                        payment_type="FULL",
+                        payment_method="UPI",
+                        notes="Friends 7v7 friendly match. Need size 5 football.",
                     )
-                )
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"Created Booking 1: {b1.booking_id} (CONFIRMED for Today 19:00)"
+                        )
+                    )
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f"Notice: Seed Booking 1 skipped: {e}"))
 
         # Booking 2: Checked-In Booking for Today (In Progress)
         if len(turf_objs) > 1:
-            slot_today_2 = TimeSlot.objects.filter(
-                turf=turf_objs[1], date=today, start_time=time(17, 0)
-            ).first()
-            if slot_today_2 and slot_today_2.status != "BOOKED":
-                b2 = BookingEngine.create_booking(
-                    turf=turf_objs[1],
-                    date_obj=today,
-                    slot_ids=[str(slot_today_2.id)],
-                    user=customer_user,
-                    payment_type="FULL",
-                    payment_method="CARD",
-                    notes="Office cricket tournament practice",
+            try:
+                candidate_slots_2 = list(
+                    TimeSlot.objects.filter(
+                        turf=turf_objs[1], date=today, start_time__gte=time(17, 0), status="AVAILABLE"
+                    ).order_by("start_time")
                 )
-                # Mark checked in
-                QRService.validate_and_checkin(
-                    b2.booking_id, staff_user, "VIP Customer, fast pass"
-                )
-                self.stdout.write(
-                    self.style.SUCCESS(f"Created Booking 2: {b2.booking_id} (CHECKED_IN)")
-                )
+                selected_slots_2 = []
+                acc_mins_2 = 0
+                for s in candidate_slots_2:
+                    if not selected_slots_2 or selected_slots_2[-1].end_time == s.start_time:
+                        selected_slots_2.append(s)
+                        dur = int(
+                            (
+                                datetime.combine(today + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                                - datetime.combine(today, s.start_time)
+                            ).total_seconds()
+                            / 60
+                        )
+                        acc_mins_2 += dur
+                        if acc_mins_2 >= 60:
+                            break
+                    else:
+                        break
+
+                if selected_slots_2 and acc_mins_2 >= 60:
+                    b2 = BookingEngine.create_booking(
+                        turf=turf_objs[1],
+                        date_obj=today,
+                        slot_ids=[str(s.id) for s in selected_slots_2],
+                        user=customer_user,
+                        payment_type="FULL",
+                        payment_method="CARD",
+                        notes="Office cricket tournament practice",
+                    )
+                    # Mark checked in
+                    QRService.validate_and_checkin(
+                        b2.booking_id, staff_user, "VIP Customer, fast pass"
+                    )
+                    self.stdout.write(
+                        self.style.SUCCESS(f"Created Booking 2: {b2.booking_id} (CHECKED_IN)")
+                    )
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f"Notice: Seed Booking 2 skipped: {e}"))
 
         # Booking 3: Completed Booking from 2 days ago with Review
         if len(turf_objs) > 0:

@@ -162,18 +162,32 @@ class VerifyLoginOTPSerializer(serializers.Serializer):
 
 class CheckAvailabilitySerializer(serializers.Serializer):
     field = serializers.ChoiceField(choices=["email", "phone"])
-    value = serializers.CharField(max_length=255)
+    value = serializers.CharField(max_length=255, required=False, allow_blank=True)
 
     def validate(self, data):
-        f = data["field"]
-        v = data["value"].strip()
+        f = data.get("field", "")
+        v = (data.get("value") or "").strip()
         if f == "email":
             email_regex = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
             if not re.match(email_regex, v):
-                raise serializers.ValidationError({"value": "Please enter a valid email format."})
-            data["value"] = v.lower()
+                data["value"] = v.lower()
+                data["is_valid_format"] = False
+            else:
+                data["value"] = v.lower()
+                data["is_valid_format"] = True
         elif f == "phone":
-            data["value"] = validate_indian_phone_number(v)
+            digits = re.sub(r"[^\d]", "", v)
+            if digits.startswith("91") and len(digits) > 10:
+                digits = digits[2:]
+            elif digits.startswith("0") and len(digits) > 10:
+                digits = digits[1:]
+
+            if len(digits) == 10 and re.match(r"^[6-9]\d{9}$", digits):
+                data["value"] = f"+91{digits}"
+                data["is_valid_format"] = True
+            else:
+                data["value"] = digits
+                data["is_valid_format"] = False
         return data
 
 

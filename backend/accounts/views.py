@@ -250,12 +250,33 @@ class CheckUserAvailabilityView(views.APIView):
         serializer = CheckAvailabilitySerializer(data={"field": field, "value": value})
         if not serializer.is_valid():
             return Response(
-                {"error": "Invalid field or format.", "details": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
+                {
+                    "exists": False,
+                    "field": field,
+                    "status": "INVALID_QUERY",
+                    "is_claimable_guest": False,
+                    "masked_value": "",
+                    "message": "Invalid query parameters.",
+                },
+                status=status.HTTP_200_OK,
             )
 
         validated_field = serializer.validated_data["field"]
         validated_val = serializer.validated_data["value"]
+        is_valid_format = serializer.validated_data.get("is_valid_format", True)
+
+        if not is_valid_format or not validated_val:
+            return Response(
+                {
+                    "exists": False,
+                    "field": validated_field,
+                    "status": "INCOMPLETE",
+                    "is_claimable_guest": False,
+                    "masked_value": "",
+                    "message": f"Enter a complete {validated_field}.",
+                },
+                status=status.HTTP_200_OK,
+            )
 
         if validated_field == "email":
             exists, user = user_lookup_engine.check_email_exists(validated_val)

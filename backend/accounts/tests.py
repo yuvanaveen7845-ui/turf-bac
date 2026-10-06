@@ -622,4 +622,25 @@ class PermanentAdminProtectionTests(TestCase):
         self.assertEqual(dup_res.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("phone", dup_res.data)
 
+    def test_check_availability_edge_cases_and_graceful_handling(self):
+        """Verify check-availability handles partial debounced input gracefully with HTTP 200."""
+        # 1. Incomplete phone with country code and spaces: '+91 91919 1919' (9 digits)
+        res1 = self.client.get("/api/auth/check-availability/?field=phone&value=%2B91+91919+1919")
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        self.assertFalse(res1.data["exists"])
+        self.assertEqual(res1.data["status"], "INCOMPLETE")
+
+        # 2. Incomplete email: 'user@'
+        res2 = self.client.get("/api/auth/check-availability/?field=email&value=user@")
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertFalse(res2.data["exists"])
+        self.assertEqual(res2.data["status"], "INCOMPLETE")
+
+        # 3. Formatted valid phone with spaces: '+91 98422 99999'
+        res3 = self.client.get("/api/auth/check-availability/?field=phone&value=%2B91+98422+99999")
+        self.assertEqual(res3.status_code, status.HTTP_200_OK)
+        self.assertFalse(res3.data["exists"])
+        self.assertEqual(res3.data["status"], "AVAILABLE")
+
+
 

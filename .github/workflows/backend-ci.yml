@@ -1,0 +1,80 @@
+name: Backend Quality & Deployment Verification
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-qa:
+    name: Backend CI (Python 3.12, Django Checks & Tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install flake8
+
+      - name: Python Syntax & Compilation Audit
+        run: |
+          python -m compileall -q .
+
+      - name: Django System Security & Deploy Check
+        env:
+          DJANGO_SETTINGS_MODULE: friends_turf.settings
+          SECRET_KEY: "ci-test-secret-key-production-verification-only"
+        run: |
+          python manage.py check
+
+      - name: Database Migration Consistency Check
+        env:
+          DJANGO_SETTINGS_MODULE: friends_turf.settings
+          SECRET_KEY: "ci-test-secret-key-production-verification-only"
+        run: |
+          python manage.py makemigrations --check --dry-run
+
+      - name: Apply Database Migrations & Validate Integrity
+        env:
+          DJANGO_SETTINGS_MODULE: friends_turf.settings
+          SECRET_KEY: "ci-test-secret-key-production-verification-only"
+        run: |
+          python manage.py migrate --noinput
+
+      - name: Execute Full Automated Test Suite
+        env:
+          DJANGO_SETTINGS_MODULE: friends_turf.settings
+          SECRET_KEY: "ci-test-secret-key-production-verification-only"
+        run: |
+          python manage.py test --noinput
+
+      - name: Verify Self-Healing Auto-Provisioning & Seed Pipeline
+        env:
+          DJANGO_SETTINGS_MODULE: friends_turf.settings
+          SECRET_KEY: "ci-test-secret-key-production-verification-only"
+        run: |
+          python -c "import os, django; os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'friends_turf.settings'); django.setup(); from turfs.apps import ensure_default_turfs; from django.apps import apps; ensure_default_turfs(apps.get_app_config('turfs')); from turfs.models import Turf; assert Turf.objects.filter(is_active=True).count() >= 2, 'Auto-provisioning failed'"
+          echo "Auto-provisioning and database self-healing verified successfully."
+
+      - name: Validate Render Procfile Deployment Command
+        run: |
+          test -f Procfile && grep -q "gunicorn" Procfile || { echo "Invalid or missing Procfile"; exit 1; }
+          echo "Procfile deployment configuration is valid."

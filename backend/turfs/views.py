@@ -143,6 +143,11 @@ class TurfListView(views.APIView):
         return [IsAdmin()]
 
     def get(self, request):
+        if Turf.objects.filter(is_active=True, is_deleted=False).count() == 0:
+            from .apps import ensure_default_turfs
+            from django.apps import apps
+            ensure_default_turfs(apps.get_app_config("turfs"))
+
         turfs = Turf.objects.filter(is_deleted=False).prefetch_related("facilities")
         sport = request.query_params.get("sport_type")
         if sport:
@@ -313,6 +318,11 @@ class DailyScheduleView(views.APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
+        if Turf.objects.filter(is_active=True, is_deleted=False).count() == 0:
+            from .apps import ensure_default_turfs
+            from django.apps import apps
+            ensure_default_turfs(apps.get_app_config("turfs"))
+
         date_str = request.query_params.get("date")
         if not date_str:
             date_obj = timezone.now().date()
@@ -344,5 +354,20 @@ class DailyScheduleView(views.APIView):
                 "turfs": turfs_data,
             }
         )
+
+
+class SeedInitView(views.APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        from .apps import ensure_default_turfs
+        from django.apps import apps
+        ensure_default_turfs(apps.get_app_config("turfs"))
+        active_turfs = Turf.objects.filter(is_active=True, is_deleted=False)
+        return Response({
+            "message": "Turf arenas and 14-day schedule successfully initialized.",
+            "active_turfs_count": active_turfs.count(),
+            "turfs": [t.name for t in active_turfs],
+        }, status=status.HTTP_200_OK)
 
 

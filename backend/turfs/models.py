@@ -85,15 +85,17 @@ class Turf(models.Model):
         return f"{self.name} - {self.location}"
 
     def save(self, *args, **kwargs):
-        if not self.slug or self.slug.strip() == "":
-            from django.utils.text import slugify
+        from django.utils.text import slugify
+        if not self.slug or str(self.slug).strip() == "":
             base_slug = slugify(self.name) or "turf"
-            slug = base_slug
-            counter = 1
-            while Turf.objects.filter(slug=slug).exclude(pk=self.pk).exists():
-                slug = f"{base_slug}-{counter}"
-                counter += 1
-            self.slug = slug
+        else:
+            base_slug = slugify(self.slug) or "turf"
+        slug = base_slug
+        counter = 1
+        while Turf.objects.filter(slug=slug).exclude(pk=self.pk).exists():
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+        self.slug = slug
         super().save(*args, **kwargs)
 
 

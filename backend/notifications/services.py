@@ -165,7 +165,6 @@ class EmailNotificationService:
                 to=[target_email],
             )
             msg.attach_alternative(html_content, "text/html")
-            msg.mixed_subtype = "related"
 
             # Attach the QR image as an inline MIME part within multipart/related
             if has_qr:

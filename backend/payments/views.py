@@ -56,7 +56,15 @@ class CreateRazorpayOrderView(views.APIView):
     def post(self, request):
         turf_id = request.data.get("turf_id")
         date_str = request.data.get("date")
-        slot_ids = request.data.get("slot_ids", [])
+        raw_slot_ids = request.data.get("slot_ids", [])
+        if hasattr(request.data, "getlist") and not isinstance(raw_slot_ids, list):
+            slot_ids = request.data.getlist("slot_ids")
+        elif isinstance(raw_slot_ids, (list, tuple, set)):
+            slot_ids = list(raw_slot_ids)
+        elif isinstance(raw_slot_ids, (int, str)):
+            slot_ids = [raw_slot_ids]
+        else:
+            slot_ids = []
         coupon_code = request.data.get("coupon_code", "").strip()
         payment_type = request.data.get("payment_type", "FULL")
         notes = request.data.get("notes", "")
@@ -1015,7 +1023,15 @@ class WalletBookingPaymentView(views.APIView):
     def post(self, request):
         turf_id = request.data.get("turf_id")
         date_str = request.data.get("date")
-        slot_ids = request.data.get("slot_ids", [])
+        raw_slot_ids = request.data.get("slot_ids", [])
+        if hasattr(request.data, "getlist") and not isinstance(raw_slot_ids, list):
+            slot_ids = request.data.getlist("slot_ids")
+        elif isinstance(raw_slot_ids, (list, tuple, set)):
+            slot_ids = list(raw_slot_ids)
+        elif isinstance(raw_slot_ids, (int, str)):
+            slot_ids = [raw_slot_ids]
+        else:
+            slot_ids = []
         coupon_code = request.data.get("coupon_code", "").strip()
         notes = request.data.get("notes", "")
 

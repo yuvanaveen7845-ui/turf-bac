@@ -53,6 +53,7 @@ class SchedulingEngine:
         - turf.operating_hours_start (default 06:00)
         - turf.operating_hours_end (default 23:00)
         - turf.slot_duration_minutes (default 60 mins)
+        Guarantees that no generated slot overlaps with ANY existing slot (booked, locked, or maintenance).
         """
         if getattr(turf, "is_deleted", False):
             return []
@@ -65,11 +66,19 @@ class SchedulingEngine:
 
         duration_minutes = turf.slot_duration_minutes or 60
 
-        existing_start_times = set(
+        # Existing slots on this day (booked, locked, maintenance, or already generated)
+        existing_slots = list(
             TimeSlot.objects.filter(turf=turf, date=date_obj).values_list(
-                "start_time", flat=True
+                "start_time", "end_time"
             )
         )
+        existing_intervals = []
+        for ex_start, ex_end in existing_slots:
+            ex_s_dt = datetime.combine(date_obj, ex_start)
+            ex_e_dt = datetime.combine(
+                date_obj + timedelta(days=1 if ex_end <= ex_start else 0), ex_end
+            )
+            existing_intervals.append((ex_s_dt, ex_e_dt))
 
         new_slots = []
         cur_dt = start_limit_dt
@@ -81,7 +90,14 @@ class SchedulingEngine:
             cur_time = cur_dt.time()
             slot_end_time = slot_end_dt.time()
 
-            if cur_time not in existing_start_times:
+            # Check overlap with any existing slot: max(start1, start2) < min(end1, end2)
+            has_overlap = False
+            for ex_s_dt, ex_e_dt in existing_intervals:
+                if max(cur_dt, ex_s_dt) < min(slot_end_dt, ex_e_dt):
+                    has_overlap = True
+                    break
+
+            if not has_overlap:
                 slot_price = (
                     round(
                         Decimal(str(turf.base_price))
@@ -115,67 +131,43 @@ class SchedulingEngine:
         )
 
     @classmethod
-    def realign_future_slots(cls, turf, days_ahead=14):
+    def realign_future_slots(cls, turf, days_ahead=14, target_date_only=None):
         """
         Re-aligns future time slots when operating hours, slot duration, or base price are updated.
-        Preserves all confirmed customer bookings and active holds.
+        Preserves all confirmed customer bookings, active holds, scheduled maintenance, and admin blocks.
+        Cleans all stale, mismatched-duration, or overlapping unbooked AVAILABLE slots.
         """
         if getattr(turf, "is_deleted", False):
             return
 
         now_local = timezone.localtime(timezone.now())
         today = now_local.date()
-        current_time = now_local.time()
 
-        start_time_limit = turf.operating_hours_start
-        end_time_limit = turf.operating_hours_end
-        duration_minutes = turf.slot_duration_minutes or 60
-        standard_price = (
-            round(
-                Decimal(str(turf.base_price))
-                * Decimal(str(duration_minutes))
-                / Decimal("60.0"),
-                2,
-            )
-            if duration_minutes != 60
-            else turf.base_price
+        dates_to_process = (
+            [target_date_only]
+            if target_date_only
+            else [today + timedelta(days=offset) for offset in range(days_ahead + 1)]
         )
 
-        for offset in range(days_ahead + 1):
-            target_date = today + timedelta(days=offset)
+        for target_date in dates_to_process:
             with transaction.atomic():
                 date_slots = TimeSlot.objects.filter(turf=turf, date=target_date)
 
-                # Check for booked or active locked slots on this day
-                booked_or_locked = date_slots.filter(
-                    models.Q(status="BOOKED")
-                    | models.Q(status="LOCKED", locked_until__gte=timezone.now())
+                # Identify slots that MUST be preserved (Booked, Unexpired Holds, Maintenance, Admin Blocked)
+                preserved_slots = list(
+                    date_slots.filter(
+                        models.Q(status="BOOKED")
+                        | models.Q(status="LOCKED", locked_until__gte=timezone.now())
+                        | models.Q(status="MAINTENANCE")
+                        | models.Q(status="BLOCKED")
+                    )
                 )
 
-                if not booked_or_locked.exists():
-                    # No active bookings or locks: safely clear and re-generate with new operating parameters
-                    date_slots.delete()
-                    cls.generate_daily_slots(turf, target_date)
-                else:
-                    # Active bookings exist: DO NOT delete booked slots
-                    # 1. Prune unbooked AVAILABLE slots that fall outside the new operating hours
-                    if end_time_limit > start_time_limit:
-                        TimeSlot.objects.filter(
-                            turf=turf,
-                            date=target_date,
-                            status="AVAILABLE",
-                        ).filter(
-                            models.Q(start_time__lt=start_time_limit)
-                            | models.Q(end_time__gt=end_time_limit)
-                        ).delete()
-                    # 2. Update base_price on all remaining AVAILABLE slots
-                    TimeSlot.objects.filter(
-                        turf=turf,
-                        date=target_date,
-                        status="AVAILABLE",
-                    ).update(price=standard_price)
-                    # 3. Fill in any missing slots within the new operating hours
-                    cls.generate_daily_slots(turf, target_date)
+                # Delete all unbooked, unlocked, and expired-hold slots to eliminate corruption and mismatched durations
+                date_slots.exclude(id__in=[s.id for s in preserved_slots]).delete()
+
+                # Re-generate fresh, uniform slots for this day around preserved slots
+                cls.generate_daily_slots(turf, target_date)
 
     @staticmethod
     def _serialize_slot_fast(
@@ -280,8 +272,46 @@ class SchedulingEngine:
         slots = list(
             TimeSlot.objects.filter(turf=turf, date=date_obj).order_by("start_time")
         )
+
+        # Self-healing integrity check: ensure slots match turf.slot_duration_minutes and do not overlap
+        expected_duration = turf.slot_duration_minutes or 60
+        needs_realign = False
+
         if not slots:
-            slots = cls.generate_daily_slots(turf, date_obj)
+            needs_realign = True
+        else:
+            # 1. Check if any unbooked AVAILABLE slot has the wrong duration
+            for s in slots:
+                if s.status == "AVAILABLE":
+                    s_dur = int(
+                        (
+                            datetime.combine(date_obj + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                            - datetime.combine(date_obj, s.start_time)
+                        ).total_seconds()
+                        / 60
+                    )
+                    if s_dur != expected_duration:
+                        needs_realign = True
+                        break
+            # 2. Check if any adjacent slots overlap
+            if not needs_realign:
+                for i in range(len(slots) - 1):
+                    s_curr = slots[i]
+                    s_next = slots[i + 1]
+                    curr_end_dt = datetime.combine(
+                        date_obj + timedelta(days=1 if s_curr.end_time <= s_curr.start_time else 0),
+                        s_curr.end_time,
+                    )
+                    next_start_dt = datetime.combine(date_obj, s_next.start_time)
+                    if curr_end_dt > next_start_dt:
+                        needs_realign = True
+                        break
+
+        if needs_realign:
+            cls.realign_future_slots(turf, target_date_only=date_obj)
+            slots = list(
+                TimeSlot.objects.filter(turf=turf, date=date_obj).order_by("start_time")
+            )
 
         maintenances = Maintenance.objects.filter(
             turf=turf, date=date_obj, status__in=["SCHEDULED", "IN_PROGRESS"]
@@ -429,11 +459,43 @@ class SchedulingEngine:
         for slot in all_slots:
             slots_by_turf[slot.turf_id].append(slot)
 
-        # Generate slots for any turf that has no slots for today
+        # Generate or self-heal slots for each turf on this date
         for turf in turfs_list:
-            if not slots_by_turf[turf.id]:
-                generated = cls.generate_daily_slots(turf, date_obj)
-                slots_by_turf[turf.id] = generated
+            t_slots = slots_by_turf[turf.id]
+            expected_dur = turf.slot_duration_minutes or 60
+            needs_heal = False
+            if not t_slots:
+                needs_heal = True
+            else:
+                for s in t_slots:
+                    if s.status == "AVAILABLE":
+                        dur = int(
+                            (
+                                datetime.combine(date_obj + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                                - datetime.combine(date_obj, s.start_time)
+                            ).total_seconds()
+                            / 60
+                        )
+                        if dur != expected_dur:
+                            needs_heal = True
+                            break
+                if not needs_heal:
+                    for i in range(len(t_slots) - 1):
+                        s_curr = t_slots[i]
+                        s_next = t_slots[i + 1]
+                        curr_end_dt = datetime.combine(
+                            date_obj + timedelta(days=1 if s_curr.end_time <= s_curr.start_time else 0),
+                            s_curr.end_time,
+                        )
+                        next_start_dt = datetime.combine(date_obj, s_next.start_time)
+                        if curr_end_dt > next_start_dt:
+                            needs_heal = True
+                            break
+            if needs_heal:
+                cls.realign_future_slots(turf, target_date_only=date_obj)
+                slots_by_turf[turf.id] = list(
+                    TimeSlot.objects.filter(turf=turf, date=date_obj).order_by("start_time")
+                )
 
         now_utc = timezone.now()
         now_local = timezone.localtime(now_utc)

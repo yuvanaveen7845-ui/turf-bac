@@ -62,7 +62,13 @@ class BookingEngine:
 
             # Verify minimum booking duration constraint (e.g. 60 minutes)
             total_duration_minutes = sum(
-                int((datetime.combine(date_obj, s.end_time) - datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                int(
+                    (
+                        datetime.combine(date_obj + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                        - datetime.combine(date_obj, s.start_time)
+                    ).total_seconds()
+                    / 60
+                )
                 for s in slots
             )
             booking_rules = BusinessSettingsHelper.get_booking_rules()
@@ -226,7 +232,13 @@ class BookingEngine:
 
             # Verify minimum booking duration (e.g. 60 minutes)
             total_duration_minutes = sum(
-                int((datetime.combine(date_obj, s.end_time) - datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                int(
+                    (
+                        datetime.combine(date_obj + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                        - datetime.combine(date_obj, s.start_time)
+                    ).total_seconds()
+                    / 60
+                )
                 for s in slots
             )
             min_duration = int(booking_rules.get("minDurationMinutes", 60))
@@ -291,7 +303,13 @@ class BookingEngine:
             elif payment_type in ("PARTIAL", "ADVANCE"):
                 hourly_rate = BusinessSettingsHelper.get_hourly_advance_rate()
                 total_duration_minutes = sum(
-                    int((datetime.combine(date_obj, s.end_time) - datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                    int(
+                        (
+                            datetime.combine(date_obj + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                            - datetime.combine(date_obj, s.start_time)
+                        ).total_seconds()
+                        / 60
+                    )
                     for s in slots
                 )
                 duration_hours = Decimal(str(total_duration_minutes)) / Decimal("60.0")

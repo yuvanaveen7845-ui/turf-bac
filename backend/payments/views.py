@@ -296,7 +296,13 @@ class CreateRazorpayOrderView(views.APIView):
             else:
                 hourly_rate = BusinessSettingsHelper.get_hourly_advance_rate()
                 total_duration_minutes = sum(
-                    int((timezone.datetime.combine(date_obj, s.end_time) - timezone.datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                    int(
+                        (
+                            timezone.datetime.combine(date_obj + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                            - timezone.datetime.combine(date_obj, s.start_time)
+                        ).total_seconds()
+                        / 60
+                    )
                     for s in slots
                 )
                 duration_hours = Decimal(str(total_duration_minutes)) / Decimal("60.0")

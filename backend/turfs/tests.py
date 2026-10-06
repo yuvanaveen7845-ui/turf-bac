@@ -1,4 +1,4 @@
-from datetime import date, time, timedelta
+from datetime import date, time, timedelta, datetime
 from decimal import Decimal
 from django.test import TestCase
 from django.utils import timezone
@@ -323,6 +323,111 @@ class TurfAPITests(TestCase):
         slots_count = TimeSlot.objects.filter(turf_id=new_turf_id, date=tomorrow).count()
         # 06:00 to 22:00 is 16 slots
         self.assertEqual(slots_count, 16)
+
+    def test_realign_slots_from_60_to_30_preserves_booking_and_eliminates_overlaps(self):
+        """When slot_duration_minutes changes to 30, unbooked 60m slots are cleaned and 30m slots never overlap bookings."""
+        from bookings.models import Booking
+        tomorrow = timezone.now().date() + timedelta(days=1)
+
+        # Generate initial 60m slots for self.turf (06:00 to 23:00)
+        self.turf.slot_duration_minutes = 60
+        self.turf.save()
+        SchedulingEngine.realign_future_slots(self.turf, days_ahead=1)
+
+        # Simulate a booking at 17:00-18:00
+        slot_1700 = TimeSlot.objects.get(turf=self.turf, date=tomorrow, start_time=time(17, 0))
+        slot_1700.status = "BOOKED"
+        slot_1700.booking_id = "FT-TEST-30M"
+        slot_1700.save()
+
+        Booking.objects.create(
+            booking_id="FT-TEST-30M",
+            customer=self.customer_user,
+            turf=self.turf,
+            date=tomorrow,
+            start_time=time(17, 0),
+            end_time=time(18, 0),
+            status="CONFIRMED",
+            total_amount=Decimal("1000.00"),
+            final_amount=Decimal("1000.00"),
+            amount_paid=Decimal("1000.00"),
+        )
+
+        # Now change slot_duration_minutes to 30 and realign
+        self.turf.slot_duration_minutes = 30
+        self.turf.save()
+        SchedulingEngine.realign_future_slots(self.turf, target_date_only=tomorrow)
+
+        # Check slots on tomorrow
+        slots_after = list(TimeSlot.objects.filter(turf=self.turf, date=tomorrow).order_by("start_time"))
+
+        # Verify the booked slot at 17:00-18:00 is intact
+        booked_slot = next(s for s in slots_after if s.status == "BOOKED")
+        self.assertEqual(booked_slot.start_time, time(17, 0))
+        self.assertEqual(booked_slot.end_time, time(18, 0))
+
+        # Verify NO slot was generated inside [17:00, 18:00]
+        inside_slots = [
+            s for s in slots_after
+            if s.id != booked_slot.id
+            and max(s.start_time, time(17, 0)) < min(s.end_time, time(18, 0))
+        ]
+        self.assertEqual(inside_slots, [], "No slot should be created overlapping the 17:00-18:00 booking")
+
+        # Verify ALL available slots have 30-min duration
+        available_slots = [s for s in slots_after if s.status == "AVAILABLE"]
+        for s in available_slots:
+            dur = (datetime.combine(tomorrow, s.end_time) - datetime.combine(tomorrow, s.start_time)).total_seconds() / 60
+            self.assertEqual(dur, 30, f"Slot {s.start_time}-{s.end_time} must be 30 minutes")
+
+        # Verify ZERO overlapping slots across the entire day
+        for i in range(len(slots_after) - 1):
+            self.assertLessEqual(
+                slots_after[i].end_time,
+                slots_after[i + 1].start_time,
+                f"Overlap detected: {slots_after[i]} and {slots_after[i+1]}"
+            )
+
+    def test_get_turf_availability_self_heals_corrupted_slots(self):
+        """get_turf_availability automatically self-heals corrupted overlapping slots on the fly."""
+        tomorrow = timezone.now().date() + timedelta(days=2)
+        self.turf.slot_duration_minutes = 30
+        self.turf.save()
+
+        # Deliberately corrupt the database: insert a 60m available slot and an overlapping 30m slot
+        TimeSlot.objects.filter(turf=self.turf, date=tomorrow).delete()
+        TimeSlot.objects.create(
+            turf=self.turf,
+            date=tomorrow,
+            start_time=time(18, 0),
+            end_time=time(19, 0),  # 60m slot
+            status="AVAILABLE",
+            price=Decimal("1000.00"),
+        )
+        TimeSlot.objects.create(
+            turf=self.turf,
+            date=tomorrow,
+            start_time=time(18, 30),
+            end_time=time(19, 0),  # overlapping 30m slot
+            status="AVAILABLE",
+            price=Decimal("500.00"),
+        )
+
+        # Call get_turf_availability: should detect corruption and self-heal
+        avail_data = SchedulingEngine.get_turf_availability(self.turf, tomorrow)
+        slots = avail_data["slots"]
+
+        # All slots should now be 30-min slots with NO overlap
+        for s in slots:
+            if s["status"] == "AVAILABLE":
+                self.assertEqual(s["start_time"][:2], s["start_time"][:2])  # start time valid
+                dur = (datetime.strptime(s["end_time"], "%H:%M:%S") - datetime.strptime(s["start_time"], "%H:%M:%S")).total_seconds() / 60
+                self.assertEqual(dur, 30)
+
+        # Verify no overlap in returned slots
+        for i in range(len(slots) - 1):
+            self.assertLessEqual(slots[i]["end_time"], slots[i + 1]["start_time"])
+
 
 
 

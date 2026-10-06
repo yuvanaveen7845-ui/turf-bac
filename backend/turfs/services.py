@@ -82,6 +82,16 @@ class SchedulingEngine:
             slot_end_time = slot_end_dt.time()
 
             if cur_time not in existing_start_times:
+                slot_price = (
+                    round(
+                        Decimal(str(turf.base_price))
+                        * Decimal(str(duration_minutes))
+                        / Decimal("60.0"),
+                        2,
+                    )
+                    if duration_minutes != 60
+                    else turf.base_price
+                )
                 new_slots.append(
                     TimeSlot(
                         turf=turf,
@@ -89,7 +99,7 @@ class SchedulingEngine:
                         start_time=cur_time,
                         end_time=slot_end_time,
                         status="AVAILABLE",
-                        price=turf.base_price,
+                        price=slot_price,
                     )
                 )
 
@@ -119,10 +129,21 @@ class SchedulingEngine:
 
         start_time_limit = turf.operating_hours_start
         end_time_limit = turf.operating_hours_end
+        duration_minutes = turf.slot_duration_minutes or 60
+        standard_price = (
+            round(
+                Decimal(str(turf.base_price))
+                * Decimal(str(duration_minutes))
+                / Decimal("60.0"),
+                2,
+            )
+            if duration_minutes != 60
+            else turf.base_price
+        )
 
-        with transaction.atomic():
-            for offset in range(days_ahead + 1):
-                target_date = today + timedelta(days=offset)
+        for offset in range(days_ahead + 1):
+            target_date = today + timedelta(days=offset)
+            with transaction.atomic():
                 date_slots = TimeSlot.objects.filter(turf=turf, date=target_date)
 
                 # Check for booked or active locked slots on this day
@@ -132,31 +153,27 @@ class SchedulingEngine:
                 )
 
                 if not booked_or_locked.exists():
-                    # No active bookings or locks: safely clear unbooked slots and re-generate
-                    if target_date == today:
-                        # For today, keep past slots, only replace future unbooked slots
-                        date_slots.filter(
-                            status="AVAILABLE",
-                            start_time__gt=current_time,
-                        ).delete()
-                        cls.generate_daily_slots(turf, target_date)
-                        date_slots.filter(status="AVAILABLE").update(price=turf.base_price)
-                    else:
-                        # Future date with 0 bookings: completely replace with new operating parameters
-                        date_slots.delete()
-                        cls.generate_daily_slots(turf, target_date)
+                    # No active bookings or locks: safely clear and re-generate with new operating parameters
+                    date_slots.delete()
+                    cls.generate_daily_slots(turf, target_date)
                 else:
                     # Active bookings exist: DO NOT delete booked slots
                     # 1. Prune unbooked AVAILABLE slots that fall outside the new operating hours
                     if end_time_limit > start_time_limit:
-                        date_slots.filter(
+                        TimeSlot.objects.filter(
+                            turf=turf,
+                            date=target_date,
                             status="AVAILABLE",
                         ).filter(
                             models.Q(start_time__lt=start_time_limit)
                             | models.Q(end_time__gt=end_time_limit)
                         ).delete()
                     # 2. Update base_price on all remaining AVAILABLE slots
-                    date_slots.filter(status="AVAILABLE").update(price=turf.base_price)
+                    TimeSlot.objects.filter(
+                        turf=turf,
+                        date=target_date,
+                        status="AVAILABLE",
+                    ).update(price=standard_price)
                     # 3. Fill in any missing slots within the new operating hours
                     cls.generate_daily_slots(turf, target_date)
 

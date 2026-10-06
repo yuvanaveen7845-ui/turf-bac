@@ -138,6 +138,10 @@ class CreateBookingSerializer(serializers.Serializer):
     )
     notes = serializers.CharField(required=False, allow_blank=True)
     participants = serializers.ListField(required=False, default=list)
+    customer_id = serializers.IntegerField(required=False, allow_null=True)
+    customer_name = serializers.CharField(required=False, allow_blank=True)
+    customer_phone = serializers.CharField(required=False, allow_blank=True)
+    customer_email = serializers.CharField(required=False, allow_blank=True)
 
 
 class CancelBookingSerializer(serializers.Serializer):

@@ -632,5 +632,108 @@ class PaymentEngineComprehensiveTests(TestCase):
         self.assertEqual(cancelled_pay_res.status_code, 400)
         self.assertIn("CANCELLED", cancelled_pay_res.data["error"])
 
+    # -------------------------------------------------------------
+    # 8. 30-MINUTE INTERVAL & SPLIT SURGE PAYMENT TESTS
+    # -------------------------------------------------------------
+    def test_30min_slots_razorpay_order_and_payment_flow(self):
+        """Verifies 30-minute contiguous slots (10:30-11:30 = 2 slots) work seamlessly with Razorpay checkout."""
+        turf_30m = Turf.objects.create(
+            name="Turf 30m Pro Arena",
+            slug="turf-30m-pro-arena",
+            sport_type="FOOTBALL",
+            base_price=Decimal("1200.00"),
+            operating_hours_start=time(6, 0),
+            operating_hours_end=time(23, 0),
+            slot_duration_minutes=30,
+        )
+        future_date = timezone.now().date() + timedelta(days=2)
+        slots_30m = SchedulingEngine.generate_daily_slots(turf_30m, future_date)
+
+        s1 = next(s for s in slots_30m if s.start_time == time(10, 30))
+        s2 = next(s for s in slots_30m if s.start_time == time(11, 0))
+
+        client = APIClient()
+        client.force_authenticate(user=self.customer)
+
+        # 1. Lock 60m contiguous slots
+        lock_res = client.post("/api/bookings/lock/", {
+            "turf_id": turf_30m.id,
+            "date": str(future_date),
+            "slot_ids": [s1.id, s2.id],
+        }, format="json")
+        self.assertEqual(lock_res.status_code, 200)
+
+        # 2. Create Razorpay order for 60m match (₹1,200)
+        with patch.object(RazorpayService, "create_order", return_value={"order_id": "order_30m_99", "amount": 120000, "currency": "INR", "key_id": "rzp_test_key"}):
+            order_res = client.post("/api/payments/razorpay/create-order/", {
+                "turf_id": turf_30m.id,
+                "date": str(future_date),
+                "slot_ids": [s1.id, s2.id],
+                "payment_type": "FULL",
+            }, format="json")
+            self.assertEqual(order_res.status_code, 201)
+            b_id = order_res.json()["booking_id"]
+
+        # 3. Verify Payment
+        with patch.object(RazorpayService, "verify_payment_signature", return_value=True):
+            verify_res = client.post("/api/payments/razorpay/verify/", {
+                "razorpay_order_id": "order_30m_99",
+                "razorpay_payment_id": "pay_30m_99",
+                "razorpay_signature": "sig_30m",
+                "booking_id": b_id,
+            }, format="json")
+            self.assertEqual(verify_res.status_code, 200)
+
+        booking = Booking.objects.get(booking_id=b_id)
+        self.assertEqual(booking.status, "CONFIRMED")
+        self.assertEqual(booking.start_time, time(10, 30))
+        self.assertEqual(booking.end_time, time(11, 30))
+        self.assertEqual(booking.final_amount, Decimal("1200.00"))
+        self.assertEqual(booking.amount_paid, Decimal("1200.00"))
+        self.assertEqual(booking.balance_due, Decimal("0.00"))
+
+    def test_30min_slots_wallet_checkout(self):
+        """Verifies customer can pay for 30-minute interval booking using Turf Cash Wallet balance."""
+        turf_30m = Turf.objects.create(
+            name="Turf 30m Wallet Arena",
+            slug="turf-30m-wallet-arena",
+            sport_type="FOOTBALL",
+            base_price=Decimal("1000.00"),
+            operating_hours_start=time(6, 0),
+            operating_hours_end=time(23, 0),
+            slot_duration_minutes=30,
+        )
+        future_date = timezone.now().date() + timedelta(days=3)
+        slots_30m = SchedulingEngine.generate_daily_slots(turf_30m, future_date)
+
+        s1 = next(s for s in slots_30m if s.start_time == time(16, 0))
+        s2 = next(s for s in slots_30m if s.start_time == time(16, 30))
+
+        # Credit wallet
+        prof = self.customer.customer_profile
+        prof.wallet_balance = Decimal("2000.00")
+        prof.save()
+
+        client = APIClient()
+        client.force_authenticate(user=self.customer)
+
+        # Checkout via wallet
+        res = client.post("/api/payments/wallet-checkout/", {
+            "turf_id": turf_30m.id,
+            "date": str(future_date),
+            "slot_ids": [s1.id, s2.id],
+        }, format="json")
+        self.assertEqual(res.status_code, 201)
+
+        b_id = res.json()["booking"]["booking_id"]
+        booking = Booking.objects.get(booking_id=b_id)
+        self.assertEqual(booking.status, "CONFIRMED")
+        self.assertEqual(booking.final_amount, Decimal("1000.00"))
+        self.assertEqual(booking.amount_paid, Decimal("1000.00"))
+
+        prof.refresh_from_db()
+        self.assertEqual(prof.wallet_balance, Decimal("1000.00"))
+
+
 
 

@@ -51,14 +51,27 @@ class BookingEngine:
             if len(slots) != len(slot_ids):
                 return False, "One or more selected slots could not be found."
 
-            # Verify contiguous / consecutive slots for multi-hour bookings
+            # Verify contiguous / consecutive slots for multi-slot bookings
             if len(slots) > 1:
                 for i in range(len(slots) - 1):
                     if slots[i].end_time != slots[i + 1].start_time:
                         return (
                             False,
-                            f"Selected slots must be consecutive hours ({slots[i].start_time.strftime('%H:%M')}-{slots[i].end_time.strftime('%H:%M')} and {slots[i+1].start_time.strftime('%H:%M')}-{slots[i+1].end_time.strftime('%H:%M')} are not contiguous).",
+                            f"Selected slots must be consecutive ({slots[i].start_time.strftime('%H:%M')}-{slots[i].end_time.strftime('%H:%M')} and {slots[i+1].start_time.strftime('%H:%M')}-{slots[i+1].end_time.strftime('%H:%M')} are not contiguous).",
                         )
+
+            # Verify minimum booking duration constraint (e.g. 60 minutes)
+            total_duration_minutes = sum(
+                int((datetime.combine(date_obj, s.end_time) - datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                for s in slots
+            )
+            booking_rules = BusinessSettingsHelper.get_booking_rules()
+            min_duration = int(booking_rules.get("minDurationMinutes", 60))
+            if total_duration_minutes < min_duration:
+                return (
+                    False,
+                    f"Minimum match duration is {min_duration} minutes (1 hour). Please select at least two consecutive 30-minute slots.",
+                )
 
             # Verify past/ongoing slot restrictions
             current_local = timezone.localtime(timezone.now())
@@ -202,6 +215,25 @@ class BookingEngine:
 
             if not slots or len(slots) != len(slot_ids):
                 raise ValueError("Selected slots are invalid or no longer available.")
+
+            # Verify contiguous slots
+            if len(slots) > 1:
+                for i in range(len(slots) - 1):
+                    if slots[i].end_time != slots[i + 1].start_time:
+                        raise ValueError(
+                            f"Selected slots must be consecutive ({slots[i].start_time.strftime('%H:%M')}-{slots[i].end_time.strftime('%H:%M')} and {slots[i+1].start_time.strftime('%H:%M')}-{slots[i+1].end_time.strftime('%H:%M')} are not contiguous)."
+                        )
+
+            # Verify minimum booking duration (e.g. 60 minutes)
+            total_duration_minutes = sum(
+                int((datetime.combine(date_obj, s.end_time) - datetime.combine(date_obj, s.start_time)).total_seconds() / 60)
+                for s in slots
+            )
+            min_duration = int(booking_rules.get("minDurationMinutes", 60))
+            if total_duration_minutes < min_duration:
+                raise ValueError(
+                    f"Minimum match duration is {min_duration} minutes (1 hour). Please select at least two consecutive 30-minute slots."
+                )
 
             # Strict availability and lock validation
             for slot in slots:
@@ -347,11 +379,8 @@ class BookingEngine:
                 )
 
             # Update customer profile stats
-            if hasattr(user, "customer_profile") and amt_paid > 0:
-                prof = user.customer_profile
-                prof.total_bookings += 1
-                prof.total_spending = Decimal(str(prof.total_spending)) + amt_paid
-                prof.save()
+            from accounts.models import CustomerProfile
+            CustomerProfile.sync_for_user(user)
 
             # Notification & Audit
             Notification.objects.create(

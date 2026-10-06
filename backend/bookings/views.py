@@ -225,12 +225,56 @@ class BookingListCreateView(views.APIView):
         data = serializer.validated_data
         turf = get_object_or_404(Turf, pk=data["turf_id"])
 
+        target_user = request.user
+        collected_by_actor = None
+        if request.user.role in ("STAFF", "ADMIN") or request.user.is_superuser:
+            customer_id = data.get("customer_id")
+            customer_phone = (data.get("customer_phone") or "").strip()
+            customer_name = (data.get("customer_name") or "").strip()
+            customer_email = (data.get("customer_email") or "").strip()
+
+            if customer_id:
+                found_cust = User.objects.filter(id=customer_id).first()
+                if found_cust:
+                    target_user = found_cust
+            elif customer_phone:
+                clean_phone = User.canonicalize_phone(customer_phone)
+                found_cust = (
+                    User.objects.filter(phone=clean_phone).first()
+                    or User.objects.filter(phone=customer_phone).first()
+                )
+                if not found_cust:
+                    slug = re.sub(r"[^\d]", "", customer_phone) if customer_phone else timezone.now().strftime("%Y%m%d%H%M%S")
+                    email = customer_email or f"walkin_{slug}_{uuid.uuid4().hex[:4]}@friendsturf.local"
+                    target_user = User.objects.create(
+                        email=email,
+                        first_name=customer_name or "Walk-in Guest",
+                        phone=clean_phone,
+                        role="CUSTOMER",
+                    )
+                else:
+                    if customer_name and found_cust.first_name in ("Walk-in Guest", "Guest Player", ""):
+                        found_cust.first_name = customer_name
+                        found_cust.save(update_fields=["first_name"])
+                    target_user = found_cust
+            elif customer_email:
+                found_cust = User.objects.filter(email__iexact=customer_email).first()
+                if not found_cust:
+                    target_user = User.objects.create(
+                        email=customer_email,
+                        first_name=customer_name or customer_email.split("@")[0],
+                        role="CUSTOMER",
+                    )
+                else:
+                    target_user = found_cust
+            collected_by_actor = request.user
+
         try:
             booking = BookingEngine.create_booking(
                 turf=turf,
                 date_obj=data["date"],
                 slot_ids=data["slot_ids"],
-                user=request.user,
+                user=target_user,
                 booking_type=data.get("booking_type", "REGULAR"),
                 coupon_code=data.get("coupon_code"),
                 payment_type=data.get("payment_type", "FULL"),
@@ -238,6 +282,7 @@ class BookingListCreateView(views.APIView):
                 notes=data.get("notes", ""),
                 participants=data.get("participants", []),
                 advance_amount=data.get("advance_amount"),
+                collected_by=collected_by_actor,
             )
             # Broadcast booking confirmed
             publish_event(

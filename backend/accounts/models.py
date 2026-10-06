@@ -133,9 +133,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         if not self.password:
             self.set_unusable_password()
         super().save(*args, **kwargs)
-        if self.role == "CUSTOMER":
-            CustomerProfile.objects.get_or_create(user=self)
-        elif self.role in ("STAFF", "ADMIN"):
+        CustomerProfile.objects.get_or_create(user=self)
+        if self.role in ("STAFF", "ADMIN"):
             StaffProfile.objects.get_or_create(user=self)
 
         try:
@@ -214,6 +213,74 @@ class CustomerProfile(models.Model):
 
     def __str__(self):
         return f"Customer: {self.user.email}"
+
+    @classmethod
+    def sync_for_user(cls, user):
+        """
+        Synchronizes denormalized lifetime metrics from bookings and ledger records.
+        Guarantees Customer CRM, Schedule Drawer, and Financial Reports never drift.
+        """
+        if not user:
+            return None
+        from decimal import Decimal
+        from django.db.models import Sum
+
+        prof, _ = cls.objects.get_or_create(user=user)
+        total_bookings = user.bookings.count()
+        cancellations = user.bookings.filter(status="CANCELLED").count()
+        no_shows = user.bookings.filter(status="NO_SHOW").count()
+
+        # Authoritative verified payments
+        payments_sum = (
+            user.payments.filter(status__in=["PAID", "SUCCESSFUL"]).aggregate(
+                Sum("amount")
+            )["amount__sum"]
+            or Decimal("0.00")
+        )
+        # Booking confirmed amount paid
+        bookings_paid_sum = (
+            user.bookings.filter(
+                status__in=["CONFIRMED", "CHECKED_IN", "IN_PROGRESS", "COMPLETED", "NO_SHOW"]
+            ).aggregate(Sum("amount_paid"))["amount_paid__sum"]
+            or Decimal("0.00")
+        )
+
+        total_spent = max(payments_sum, bookings_paid_sum)
+
+        tier = "REGULAR"
+        if total_spent >= Decimal("10000.00"):
+            tier = "PLATINUM"
+        elif total_spent >= Decimal("5000.00"):
+            tier = "GOLD"
+        elif total_spent >= Decimal("2000.00"):
+            tier = "SILVER"
+
+        prof.total_bookings = total_bookings
+        prof.total_spending = total_spent
+        prof.cancellation_count = cancellations
+        prof.no_show_count = no_shows
+        prof.membership_tier = tier
+        prof.save(
+            update_fields=[
+                "total_bookings",
+                "total_spending",
+                "cancellation_count",
+                "no_show_count",
+                "membership_tier",
+            ]
+        )
+        return prof
+
+    @classmethod
+    def sync_all_profiles(cls):
+        """Batch syncs all users to ensure complete parity across CRM and reports."""
+        from django.db.models import Q
+        users = User.objects.filter(Q(role="CUSTOMER") | Q(bookings__isnull=False)).distinct()
+        synced_count = 0
+        for u in users:
+            cls.sync_for_user(u)
+            synced_count += 1
+        return synced_count
 
 
 class StaffProfile(models.Model):

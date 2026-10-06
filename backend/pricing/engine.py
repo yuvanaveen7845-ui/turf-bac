@@ -63,6 +63,27 @@ class PricingEngine:
         """
         base_price = Decimal(str(turf.base_price))
 
+        # Prorate base price for slot duration (e.g. 30m slot = base_price * 30 / 60)
+        if start_time_obj and end_time_obj:
+            try:
+                sh, sm = (
+                    (start_time_obj.hour, start_time_obj.minute)
+                    if hasattr(start_time_obj, "hour")
+                    else [int(x) for x in str(start_time_obj).split(":")[:2]]
+                )
+                eh, em = (
+                    (end_time_obj.hour, end_time_obj.minute)
+                    if hasattr(end_time_obj, "hour")
+                    else [int(x) for x in str(end_time_obj).split(":")[:2]]
+                )
+                duration_mins = (eh * 60 + em) - (sh * 60 + sm)
+                if duration_mins < 0:
+                    duration_mins += 24 * 60
+                if duration_mins > 0 and duration_mins != 60:
+                    base_price = round(base_price * Decimal(str(duration_mins)) / Decimal("60.0"), 2)
+            except Exception:
+                pass
+
         # Check feature flag for dynamic surge pricing
         if not BusinessSettingsHelper.is_feature_enabled("DYNAMIC_PRICING", default=True):
             min_slot_price = Decimal(str(BusinessSettingsHelper.get_payment_settings().get("minSlotPrice", 1.0)))

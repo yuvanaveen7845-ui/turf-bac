@@ -192,3 +192,51 @@ class ReconciliationEngine:
 
             else:
                 raise ValueError(f"Unknown anomaly resolution type: {anomaly_type}")
+
+    @classmethod
+    def auto_heal_all_balance_mismatches(cls, user=None):
+        """
+        Scans and automatically repairs all balance discrepancies across active bookings.
+        Recalculates amount_paid directly from successful Payment records and updates balance_due.
+        """
+        with transaction.atomic():
+            repaired = []
+            for b in Booking.objects.exclude(status="CANCELLED").select_for_update():
+                actual_paid = sum(
+                    p.amount
+                    for p in Payment.objects.filter(booking=b, status__in=["PAID", "SUCCESSFUL"])
+                )
+                expected_balance = max(Decimal("0.00"), b.final_amount - actual_paid)
+                if b.amount_paid != actual_paid or b.balance_due != expected_balance:
+                    old_paid, old_bal = b.amount_paid, b.balance_due
+                    b.amount_paid = actual_paid
+                    b.balance_due = expected_balance
+                    b.save(update_fields=["amount_paid", "balance_due"])
+                    repaired.append({
+                        "booking_id": b.booking_id,
+                        "old_paid": float(old_paid),
+                        "new_paid": float(actual_paid),
+                        "old_balance": float(old_bal),
+                        "new_balance": float(expected_balance),
+                    })
+
+            if repaired:
+                AuditLog.objects.create(
+                    user=user,
+                    action="FINANCIAL_BATCH_RECONCILIATION",
+                    resource_type="BOOKING_LEDGER",
+                    resource_id=f"REPAIRED_{len(repaired)}_BOOKINGS",
+                    details={"repaired_count": len(repaired), "items": repaired},
+                )
+                publish_event(
+                    channel="operations",
+                    event_type="OPERATIONS_UPDATE",
+                    payload={"type": "BATCH_RECONCILIATION_COMPLETED", "repaired_count": len(repaired)},
+                )
+
+            return {
+                "success": True,
+                "message": f"Successfully audited and reconciled {len(repaired)} booking ledger(s).",
+                "repaired_count": len(repaired),
+                "items": repaired,
+            }

@@ -17,6 +17,7 @@ from .views import (
     DailyCashDrawerView,
     ReconciliationScanView,
     ReconciliationResolveView,
+    BatchReconcileAnomaliesView,
     ExportPaymentsCsvView,
 )
 
@@ -37,6 +38,7 @@ urlpatterns = [
     path("daily-cash/", DailyCashDrawerView.as_view(), name="daily_cash_drawer"),
     path("reconciliation/", ReconciliationScanView.as_view(), name="reconciliation_scan"),
     path("reconciliation/resolve/", ReconciliationResolveView.as_view(), name="reconciliation_resolve"),
+    path("reconciliation/batch-resolve/", BatchReconcileAnomaliesView.as_view(), name="reconciliation_batch_resolve"),
     path("cancellation-quote/<str:booking_id>/", CancellationQuoteView.as_view(), name="cancellation_quote"),
     path("export/", ExportPaymentsCsvView.as_view(), name="export_payments_csv"),
 ]

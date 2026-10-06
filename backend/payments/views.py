@@ -62,13 +62,18 @@ class CreateRazorpayOrderView(views.APIView):
         notes = request.data.get("notes", "")
         participants = request.data.get("participants", [])
 
-        if request.user.is_authenticated:
-            payer_user = request.user
-        else:
-            customer_name = request.data.get("customer_name", "").strip()
-            customer_phone = request.data.get("customer_phone", "").strip()
-            customer_email = request.data.get("customer_email", "").strip()
+        customer_name = request.data.get("customer_name", "").strip()
+        customer_phone = request.data.get("customer_phone", "").strip()
+        customer_email = request.data.get("customer_email", "").strip()
+        customer_id = request.data.get("customer_id")
 
+        if request.user.is_authenticated and request.user.role == "CUSTOMER" and not customer_phone and not customer_id:
+            payer_user = request.user
+        elif request.user.is_authenticated and (request.user.role in ("STAFF", "ADMIN") or request.user.is_superuser) and not customer_phone and not customer_name and not customer_id:
+            payer_user = request.user
+        elif customer_id:
+            payer_user = User.objects.filter(id=customer_id).first() or request.user
+        else:
             clean_digits = re.sub(r"[^\d]", "", customer_phone)
             # Normalize 10-digit Indian mobile number from +91 or 0 prefix
             if clean_digits.startswith("91") and len(clean_digits) == 12:
@@ -76,7 +81,7 @@ class CreateRazorpayOrderView(views.APIView):
             elif clean_digits.startswith("0") and len(clean_digits) == 11:
                 clean_digits = clean_digits[1:]
 
-            if not re.match(r"^[6-9]\d{9}$", clean_digits):
+            if not re.match(r"^[6-9]\d{9}$", clean_digits) and not (request.user.is_authenticated and request.user.role in ("STAFF", "ADMIN")):
                 return Response(
                     {
                         "error": "Please provide a valid 10-digit Indian mobile number (must be 10 digits starting with 6, 7, 8, or 9).",
@@ -86,7 +91,7 @@ class CreateRazorpayOrderView(views.APIView):
                 )
 
             clean_name = re.sub(r"\s+", " ", customer_name).strip()
-            if not clean_name or len(clean_name) < 2:
+            if (not clean_name or len(clean_name) < 2) and not (request.user.is_authenticated and request.user.role in ("STAFF", "ADMIN")):
                 return Response(
                     {
                         "error": "Please provide a valid player or team name (minimum 2 characters).",
@@ -105,22 +110,33 @@ class CreateRazorpayOrderView(views.APIView):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
-            payer_user = (
-                User.objects.filter(phone=clean_digits).first()
-                or User.objects.filter(phone=f"+91{clean_digits}").first()
-                or User.objects.filter(phone=customer_phone).first()
-            )
-            if not payer_user:
-                email = customer_email or f"guest_{clean_digits}_{uuid.uuid4().hex[:4]}@friendsturf.local"
-                payer_user = User.objects.create(
-                    email=email,
-                    first_name=clean_name,
-                    phone=clean_digits,
-                    role="CUSTOMER",
+            payer_user = None
+            if clean_digits:
+                payer_user = (
+                    User.objects.filter(phone=clean_digits).first()
+                    or User.objects.filter(phone=f"+91{clean_digits}").first()
+                    or User.objects.filter(phone=customer_phone).first()
                 )
+            if not payer_user and customer_email:
+                payer_user = User.objects.filter(email__iexact=customer_email).first()
+
+            if not payer_user:
+                if clean_digits:
+                    email = customer_email or f"guest_{clean_digits}_{uuid.uuid4().hex[:4]}@friendsturf.local"
+                    payer_user = User.objects.create(
+                        email=email,
+                        first_name=clean_name or "Guest Player",
+                        phone=clean_digits,
+                        role="CUSTOMER",
+                    )
+                else:
+                    payer_user = request.user if request.user.is_authenticated else None
             elif clean_name and payer_user.first_name in ("Guest Player", "Walk-in Guest", ""):
                 payer_user.first_name = clean_name
                 payer_user.save()
+
+            if not payer_user:
+                return Response({"error": "Unable to resolve customer for payment order."}, status=status.HTTP_400_BAD_REQUEST)
 
         if not BusinessSettingsHelper.is_feature_enabled("ONLINE_PAYMENTS"):
             return Response(
@@ -577,11 +593,8 @@ class VerifyRazorpayPaymentView(views.APIView):
         QRService.generate_qr_for_booking(booking)
 
         # Update Customer profile spending
-        if hasattr(booking.customer, "customer_profile"):
-            prof = booking.customer.customer_profile
-            prof.total_bookings += 1
-            prof.total_spending = Decimal(str(prof.total_spending)) + Decimal(str(payment.amount))
-            prof.save()
+        from accounts.models import CustomerProfile
+        CustomerProfile.sync_for_user(booking.customer)
 
         # Send in-app notification
         Notification.objects.create(
@@ -2102,6 +2115,7 @@ class ReconciliationScanView(views.APIView):
 class ReconciliationResolveView(views.APIView):
     """
     Resolves a flagged reconciliation anomaly inside an atomic transaction.
+    Accepts explicit anomaly_type or auto-parses composite anomaly_id.
     """
     permission_classes = [IsManager]
 
@@ -2109,9 +2123,22 @@ class ReconciliationResolveView(views.APIView):
         anomaly_type = request.data.get("anomaly_type")
         payment_id = request.data.get("payment_id")
         booking_id = request.data.get("booking_id")
+        anomaly_id = request.data.get("anomaly_id", "")
+
+        # Auto-parse from composite anomaly_id if params omitted
+        if not anomaly_type and anomaly_id:
+            if "ANOMALY-AMOUNT-MISMATCH-" in anomaly_id:
+                anomaly_type = "AMOUNT_MISMATCH"
+                booking_id = anomaly_id.replace("ANOMALY-AMOUNT-MISMATCH-", "")
+            elif "ANOMALY-UNCONFIRMED-" in anomaly_id:
+                anomaly_type = "UNCONFIRMED_PAID_BOOKING"
+                payment_id = anomaly_id.replace("ANOMALY-UNCONFIRMED-", "")
+            elif "ANOMALY-STALE-PENDING-" in anomaly_id:
+                anomaly_type = "STALE_PENDING_PAYMENT"
+                payment_id = anomaly_id.replace("ANOMALY-STALE-PENDING-", "")
 
         if not anomaly_type:
-            return Response({"error": "anomaly_type is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "anomaly_type or valid anomaly_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             res = ReconciliationEngine.resolve_anomaly(
@@ -2120,6 +2147,20 @@ class ReconciliationResolveView(views.APIView):
                 booking_id=booking_id,
                 user=request.user,
             )
+            return Response(res, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BatchReconcileAnomaliesView(views.APIView):
+    """
+    1-Click batch reconciliation view to scan and auto-heal all balance and accounting mismatches.
+    """
+    permission_classes = [IsManager]
+
+    def post(self, request):
+        try:
+            res = ReconciliationEngine.auto_heal_all_balance_mismatches(user=request.user)
             return Response(res, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

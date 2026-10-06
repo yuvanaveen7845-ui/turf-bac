@@ -1030,8 +1030,10 @@ class AdminCustomerListView(views.APIView):
     permission_classes = [IsStaffOrAdmin]
 
     def get(self, request):
+        # Include all CUSTOMER accounts and any user account that has booking history
         customers = (
-            User.objects.filter(role="CUSTOMER")
+            User.objects.filter(models.Q(role="CUSTOMER") | models.Q(bookings__isnull=False))
+            .distinct()
             .select_related("customer_profile")
             .order_by("-date_joined")
         )
@@ -1043,6 +1045,11 @@ class AdminCustomerListView(views.APIView):
                 | models.Q(last_name__icontains=search)
                 | models.Q(phone__icontains=search)
             )
+        # Ensure customer profiles exist and are synced
+        for c in customers:
+            if not hasattr(c, "customer_profile") or c.customer_profile is None or (c.bookings.count() > 0 and c.customer_profile.total_bookings == 0):
+                CustomerProfile.sync_for_user(c)
+
         serializer = UserSerializer(customers, many=True)
         return Response(serializer.data)
 
@@ -1344,7 +1351,8 @@ class AdminCustomerDetailView(views.APIView):
         from reviews.serializers import ReviewSerializer
         from decimal import Decimal
 
-        customer = generics.get_object_or_404(User, pk=pk, role="CUSTOMER")
+        customer = generics.get_object_or_404(User, pk=pk)
+        CustomerProfile.sync_for_user(customer)
         user_data = UserSerializer(customer).data
 
         # ── Live queries for detail sections ──────────────────────────────────

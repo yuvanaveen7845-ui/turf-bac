@@ -11,6 +11,7 @@ from .views import (
     OperationsControlCenterOverviewView,
     OperationsReleaseHoldView,
     OperationsMarkNoShowView,
+    OperationsReleaseConflictView,
 )
 
 urlpatterns = [
@@ -25,6 +26,7 @@ urlpatterns = [
     path("operations/overview/", OperationsControlCenterOverviewView.as_view(), name="operations_overview"),
     path("operations/release-hold/", OperationsReleaseHoldView.as_view(), name="operations_release_hold"),
     path("operations/mark-no-show/", OperationsMarkNoShowView.as_view(), name="operations_mark_no_show"),
+    path("operations/release-conflict/", OperationsReleaseConflictView.as_view(), name="operations_release_conflict"),
 ]
 
 

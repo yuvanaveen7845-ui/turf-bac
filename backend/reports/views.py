@@ -98,7 +98,7 @@ class AdminDashboardMetricsView(views.APIView):
             hr_str = st.strftime("%I %p") if hasattr(st, "strftime") else str(st)
             peak_hours.append({"hour": hr_str, "count": p["count"]})
 
-        # 7. Turf Utilization (Annotated in single query)
+        # 7. Turf Utilization (Annotated in single query for active turfs)
         turf_utilization = [
             {
                 "turf_name": t.name,
@@ -106,7 +106,7 @@ class AdminDashboardMetricsView(views.APIView):
                 "total_bookings": t.total_bookings,
                 "base_price": float(t.base_price),
             }
-            for t in Turf.objects.annotate(total_bookings=Count("bookings"))
+            for t in Turf.objects.filter(is_active=True).annotate(total_bookings=Count("bookings"))
         ]
 
         return Response(
@@ -344,8 +344,8 @@ class GlobalSearchView(views.APIView):
 
         # 2. Customers
         customers_qs = User.objects.filter(
-            role="CUSTOMER"
-        ).filter(
+            Q(role="CUSTOMER") | Q(bookings__isnull=False)
+        ).distinct().filter(
             Q(email__icontains=q)
             | Q(first_name__icontains=q)
             | Q(last_name__icontains=q)
@@ -424,14 +424,15 @@ class GlobalSearchView(views.APIView):
         # 6. QR Passes
         passes_qs = QRCredential.objects.filter(
             Q(booking__booking_id__icontains=q)
-            | Q(token_hash__icontains=q)
+            | Q(credential_token__icontains=q)
+            | Q(credential_hash__icontains=q)
         ).select_related("booking", "booking__customer")[:5]
 
         passes = [
             {
                 "id": str(p.id),
-                "title": f"Match Pass v{p.version} ({p.booking.booking_id})",
-                "subtitle": f"Player: {p.booking.customer.get_full_name()} | Status: {p.status}",
+                "title": f"Match Pass v{p.credential_version} ({p.booking.booking_id if p.booking else 'Pass'})",
+                "subtitle": f"Player: {p.booking.customer.get_full_name() if p.booking and p.booking.customer else 'Player'} | Status: {p.status}",
                 "status": p.status,
                 "url": f"/admin/qr-management",
             }
@@ -576,26 +577,32 @@ class DailyOperationsView(views.APIView):
         walk_in_count = today_bookings.filter(booking_type="WALK_IN").count()
         no_show_count = today_bookings.filter(status="NO_SHOW").count()
 
-        # Turf statuses
-        turfs = Turf.objects.all()
+        # Turf statuses (Only active operational pitches)
+        turfs = Turf.objects.filter(is_active=True)
         turf_statuses = []
         for t in turfs:
             current_booking = today_bookings.filter(turf=t, start_time__lte=now_time, end_time__gte=now_time, status__in=["CONFIRMED", "CHECKED_IN"]).first()
             next_booking = today_bookings.filter(turf=t, start_time__gt=now_time, status__in=["CONFIRMED", "UPCOMING"]).order_by("start_time").first()
             turf_statuses.append({
+                "id": t.id,
                 "turf_id": t.id,
                 "name": t.name,
+                "turf_type": t.sport_type,
                 "sport": t.sport_type,
                 "is_occupied": bool(current_booking),
                 "current_match": {
+                    "id": current_booking.id,
                     "booking_id": current_booking.booking_id,
-                    "customer": current_booking.customer.get_full_name(),
+                    "customer_name": (current_booking.customer.get_full_name() if current_booking.customer else "") or getattr(current_booking.customer, "phone", "") or "Player",
+                    "time_window": f"{current_booking.start_time.strftime('%H:%M')} - {current_booking.end_time.strftime('%H:%M')}",
                     "time": f"{current_booking.start_time.strftime('%H:%M')} - {current_booking.end_time.strftime('%H:%M')}",
                     "status": current_booking.status,
                 } if current_booking else None,
                 "next_match": {
+                    "id": next_booking.id,
                     "booking_id": next_booking.booking_id,
-                    "customer": next_booking.customer.get_full_name(),
+                    "customer_name": (next_booking.customer.get_full_name() if next_booking.customer else "") or getattr(next_booking.customer, "phone", "") or "Player",
+                    "time_window": f"{next_booking.start_time.strftime('%H:%M')} - {next_booking.end_time.strftime('%H:%M')}",
                     "time": f"{next_booking.start_time.strftime('%H:%M')} - {next_booking.end_time.strftime('%H:%M')}",
                 } if next_booking else None,
             })
@@ -622,6 +629,7 @@ class DailyOperationsView(views.APIView):
                 "total_revenue_today": float(total_collected),
             },
             "turfs": turf_statuses,
+            "pitches": turf_statuses,
         })
 
 
@@ -1198,6 +1206,47 @@ class OperationsMarkNoShowView(views.APIView):
             "success": True,
             "message": f"Booking {booking.booking_id} marked as NO_SHOW.",
             "booking_id": booking.booking_id,
+        })
+
+
+class OperationsReleaseConflictView(views.APIView):
+    """
+    Releases slots stuck in BOOKED state for cancelled or invalid bookings.
+    """
+    permission_classes = [IsStaffOrAdmin]
+
+    def post(self, request):
+        from audit.models import AuditLog
+
+        booking_id = request.data.get("booking_id")
+        if not booking_id:
+            return Response({"error": "booking_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        booking = Booking.objects.filter(booking_id=booking_id).first()
+        if not booking:
+            return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        with transaction.atomic():
+            released_count = 0
+            for slot in booking.slots.filter(status="BOOKED"):
+                slot.status = "AVAILABLE"
+                slot.locked_until = None
+                slot.locked_by = None
+                slot.save()
+                released_count += 1
+
+            AuditLog.objects.create(
+                user=request.user,
+                action="OPERATIONS_CONFLICT_RELEASED",
+                resource_type="BOOKING_SLOTS",
+                resource_id=booking.booking_id,
+                details={"released_slots": released_count, "staff": request.user.email},
+            )
+
+        return Response({
+            "success": True,
+            "message": f"Successfully released {released_count} stuck slot(s) for booking {booking.booking_id}.",
+            "released_count": released_count,
         })
 
 

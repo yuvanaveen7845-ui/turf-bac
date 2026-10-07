@@ -14,7 +14,7 @@ allowed_hosts_env = os.getenv("ALLOWED_HOSTS", "").strip()
 if allowed_hosts_env:
     ALLOWED_HOSTS = [h.strip() for h in allowed_hosts_env.split(",") if h.strip()]
 else:
-    ALLOWED_HOSTS = ["*", ".onrender.com", "localhost", "127.0.0.1"]
+    ALLOWED_HOSTS = ["*", ".onrender.com", ".koyeb.app", "localhost", "127.0.0.1"]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -239,6 +239,7 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
 # CSRF Trusted Origins for HTTPS requests in production
 DEFAULT_CSRF_TRUSTED_ORIGINS = [
     "https://*.onrender.com",
+    "https://*.koyeb.app",
     "https://*.vercel.app",
     "https://*.pages.dev",
     "https://turf-fron.pages.dev",

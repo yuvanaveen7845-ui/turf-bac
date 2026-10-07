@@ -91,3 +91,24 @@ class SpecialEvent(models.Model):
 
     def __str__(self):
         return f"{self.name} on {self.date}"
+
+
+# ─── Pricing Invalidation Signals ──────────────────────────────────────────
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+
+@receiver([post_save, post_delete], sender=PricingRule)
+def invalidate_cache_on_pricing_rule_change(sender, instance, **kwargs):
+    from .engine import PricingEngine
+    PricingEngine.invalidate_pricing_cache(turf=instance.turf)
+
+@receiver([post_save, post_delete], sender=Holiday)
+def invalidate_cache_on_holiday_change(sender, instance, **kwargs):
+    from .engine import PricingEngine
+    PricingEngine.invalidate_pricing_cache()
+
+@receiver([post_save, post_delete], sender=SpecialEvent)
+def invalidate_cache_on_special_event_change(sender, instance, **kwargs):
+    from .engine import PricingEngine
+    PricingEngine.invalidate_pricing_cache(turf=instance.turf)
+

@@ -143,30 +143,47 @@ class TurfListView(views.APIView):
         return [IsAdmin()]
 
     def get(self, request):
+        sport = request.query_params.get("sport_type")
+        is_active = request.query_params.get("is_active")
+
+        is_admin_or_staff = bool(
+            request.user
+            and request.user.is_authenticated
+            and (
+                getattr(request.user, "role", "") in ("ADMIN", "STAFF")
+                or request.user.is_superuser
+            )
+        )
+
+        # Fast in-memory cache bypass for public/customer visits (300s TTL)
+        cache_key = f"turfs_public_list_{sport.upper() if sport else 'ALL'}"
+        if not is_admin_or_staff and is_active is None:
+            from django.core.cache import cache
+            cached_data = cache.get(cache_key)
+            if cached_data is not None:
+                return Response(cached_data)
+
         if Turf.objects.filter(is_active=True, is_deleted=False).count() == 0:
             from .apps import ensure_default_turfs
             from django.apps import apps
             ensure_default_turfs(apps.get_app_config("turfs"))
 
         turfs = Turf.objects.filter(is_deleted=False).prefetch_related("facilities")
-        sport = request.query_params.get("sport_type")
         if sport:
             turfs = turfs.filter(sport_type=sport.upper())
-        is_active = request.query_params.get("is_active")
         if is_active is not None:
             turfs = turfs.filter(is_active=is_active.lower() == "true")
-        elif not (
-            request.user
-            and request.user.is_authenticated
-            and (
-                getattr(request.user, "role", "") == "ADMIN"
-                or request.user.is_superuser
-            )
-        ):
+        elif not is_admin_or_staff:
             turfs = turfs.filter(is_active=True)
 
         serializer = TurfSerializer(turfs, many=True)
-        return Response(serializer.data)
+        data = serializer.data
+
+        if not is_admin_or_staff and is_active is None:
+            from django.core.cache import cache
+            cache.set(cache_key, data, timeout=300)
+
+        return Response(data)
 
     def post(self, request):
         serializer = TurfSerializer(data=request.data)

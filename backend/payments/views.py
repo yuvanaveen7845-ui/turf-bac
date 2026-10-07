@@ -12,6 +12,7 @@ from django.http import HttpResponse, HttpResponseRedirect
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.conf import settings
+from django.core.cache import cache
 from rest_framework import status, views, permissions
 from rest_framework.response import Response
 
@@ -25,7 +26,6 @@ from bookings.models import Booking
 from bookings.serializers import BookingSerializer
 from turfs.models import Turf, TimeSlot
 from pricing.engine import PricingEngine
-from promotions.models import Coupon, CouponUsage
 from qr_system.services import QRService
 from notifications.models import Notification
 from notifications.services import EmailNotificationService
@@ -66,6 +66,7 @@ class CreateRazorpayOrderView(views.APIView):
         else:
             slot_ids = []
         coupon_code = request.data.get("coupon_code", "").strip()
+        lock_token = request.data.get("lock_token", "").strip()
         payment_type = request.data.get("payment_type", "FULL")
         notes = request.data.get("notes", "")
         participants = request.data.get("participants", [])
@@ -268,6 +269,16 @@ class CreateRazorpayOrderView(views.APIView):
                                 },
                                 status=status.HTTP_409_CONFLICT,
                             )
+                    else:
+                        cached_token = cache.get(f"slot_guest_token_{slot.id}")
+                        if cached_token and lock_token and cached_token != lock_token:
+                            return Response(
+                                {
+                                    "error": f"Slot {slot.start_time.strftime('%I:%M %p')} is currently held by another user.",
+                                    "code": "SLOT_LOCKED_BY_OTHER",
+                                },
+                                status=status.HTTP_409_CONFLICT,
+                            )
 
             # Apply 5-minute lock on slots
             for slot in slots:
@@ -277,16 +288,11 @@ class CreateRazorpayOrderView(views.APIView):
                 slot.save()
 
             # Compute accurate server-side pricing
-            coupon = None
-            if coupon_code:
-                coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
-
             slot_items = [{"start_time": s.start_time, "end_time": s.end_time} for s in slots]
             price_data = PricingEngine.calculate_booking_total(
                 turf=turf,
                 date_obj=date_obj,
                 slot_items=slot_items,
-                coupon=coupon,
                 user=payer_user,
             )
 
@@ -346,7 +352,7 @@ class CreateRazorpayOrderView(views.APIView):
                 final_amount=final_amt,
                 amount_paid=Decimal("0.00"),
                 balance_due=final_amt,
-                coupon_code=coupon.code if coupon else "",
+                coupon_code="",
                 pricing_breakdown=price_data,
                 participants=participants or [],
                 notes=notes,
@@ -589,19 +595,6 @@ class VerifyRazorpayPaymentView(views.APIView):
             slot.locked_until = None
             slot.locked_by = None
             slot.save()
-
-        # Record coupon usage if coupon applied
-        if booking.coupon_code:
-            coupon = Coupon.objects.filter(code__iexact=booking.coupon_code).first()
-            if coupon:
-                coupon.usage_count += 1
-                coupon.save()
-                CouponUsage.objects.create(
-                    coupon=coupon,
-                    user=booking.customer,
-                    booking=booking,
-                    discount_applied=booking.discount_amount,
-                )
 
         # Generate Cryptographic QR Ticket
         QRService.generate_qr_for_booking(booking)
@@ -1039,6 +1032,7 @@ class WalletBookingPaymentView(views.APIView):
         else:
             slot_ids = []
         coupon_code = request.data.get("coupon_code", "").strip()
+        lock_token = request.data.get("lock_token", "").strip()
         notes = request.data.get("notes", "")
 
         if not turf_id or not date_str or not slot_ids:
@@ -1088,23 +1082,26 @@ class WalletBookingPaymentView(views.APIView):
                     {"error": f"Slot {slot.start_time.strftime('%H:%M')} is under maintenance."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            if slot.status == "LOCKED" and not slot.is_lock_expired() and slot.locked_by != request.user:
-                return Response(
-                    {"error": f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."},
-                    status=status.HTTP_409_CONFLICT,
-                )
+            if slot.status == "LOCKED" and not slot.is_lock_expired():
+                if slot.locked_by is not None and slot.locked_by != request.user:
+                    return Response(
+                        {"error": f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                elif slot.locked_by is None:
+                    cached_token = cache.get(f"slot_guest_token_{slot.id}")
+                    if cached_token and lock_token and cached_token != lock_token:
+                        return Response(
+                            {"error": f"Slot {slot.start_time.strftime('%H:%M')} is held by another user."},
+                            status=status.HTTP_409_CONFLICT,
+                        )
 
         # Price calculation
-        coupon = None
-        if coupon_code:
-            coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
-
         slot_items = [{"start_time": s.start_time, "end_time": s.end_time} for s in slots]
         price_data = PricingEngine.calculate_booking_total(
             turf=turf,
             date_obj=date_obj,
             slot_items=slot_items,
-            coupon=coupon,
             user=request.user,
         )
 
@@ -1146,7 +1143,7 @@ class WalletBookingPaymentView(views.APIView):
             final_amount=final_amt,
             amount_paid=final_amt,
             balance_due=Decimal("0.00"),
-            coupon_code=coupon.code if coupon else "",
+            coupon_code="",
             pricing_breakdown=price_data,
             notes=notes,
         )
@@ -1186,16 +1183,6 @@ class WalletBookingPaymentView(views.APIView):
             description=f"Slot Booking at {turf.name} ({booking.booking_id})",
             balance_after=prof.wallet_balance,
         )
-
-        if coupon:
-            coupon.usage_count += 1
-            coupon.save()
-            CouponUsage.objects.create(
-                coupon=coupon,
-                user=booking.customer,
-                booking=booking,
-                discount_applied=booking.discount_amount,
-            )
 
         QRService.generate_qr_for_booking(booking)
 

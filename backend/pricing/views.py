@@ -23,11 +23,25 @@ class PricingRuleListCreateView(generics.ListCreateAPIView):
             return [permissions.AllowAny()]
         return [IsAdmin()]
 
+    def perform_create(self, serializer):
+        instance = serializer.save()
+        PricingEngine.invalidate_pricing_cache(turf=instance.turf)
+
 
 class PricingRuleDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = PricingRule.objects.all()
     serializer_class = PricingRuleSerializer
     permission_classes = [IsAdmin]
+
+    def perform_update(self, serializer):
+        instance = serializer.save()
+        PricingEngine.invalidate_pricing_cache(turf=instance.turf)
+
+    def perform_destroy(self, instance):
+        turf = instance.turf
+        super().perform_destroy(instance)
+        PricingEngine.invalidate_pricing_cache(turf=turf)
+
 
 
 class HolidayListCreateView(generics.ListCreateAPIView):

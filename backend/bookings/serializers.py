@@ -110,16 +110,18 @@ class LockSlotSerializer(serializers.Serializer):
     turf_id = serializers.CharField()
     date = serializers.DateField()
     slot_ids = serializers.ListField(child=serializers.CharField())
+    lock_token = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 class CreateBookingSerializer(serializers.Serializer):
     turf_id = serializers.CharField()
     date = serializers.DateField()
     slot_ids = serializers.ListField(child=serializers.CharField())
+    lock_token = serializers.CharField(required=False, allow_blank=True, default="")
     booking_type = serializers.ChoiceField(
         choices=Booking.BOOKING_TYPE_CHOICES, default="REGULAR"
     )
-    coupon_code = serializers.CharField(required=False, allow_blank=True)
+    coupon_code = serializers.CharField(required=False, allow_blank=True, default="")
     payment_type = serializers.ChoiceField(
         choices=[("FULL", "Full"), ("PARTIAL", "Partial"), ("ADVANCE", "Advance"), ("PENDING", "Pending")],
         default="FULL",

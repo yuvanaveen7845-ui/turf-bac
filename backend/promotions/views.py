@@ -36,47 +36,10 @@ class CouponDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class ValidateCouponView(views.APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        code = request.data.get("code", "").strip().upper()
-        amount = Decimal(str(request.data.get("amount", "0.00")))
-
-        from accounts.settings_helper import BusinessSettingsHelper
-        if not BusinessSettingsHelper.is_feature_enabled("COUPONS"):
-            return Response(
-                {"is_valid": False, "message": "Coupons and promotional discounts are currently disabled."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if not code:
-            return Response(
-                {"error": "Coupon code required."}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-        coupon = Coupon.objects.filter(code=code).first()
-        if not coupon:
-            return Response(
-                {"is_valid": False, "message": "Invalid coupon code."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        valid, msg = coupon.is_valid_for_user(request.user, amount)
-        if not valid:
-            return Response(
-                {"is_valid": False, "message": msg}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-        discount = coupon.calculate_discount(amount)
         return Response(
-            {
-                "is_valid": True,
-                "code": coupon.code,
-                "title": coupon.title,
-                "discount_type": coupon.discount_type,
-                "discount_value": float(coupon.discount_value),
-                "discount_amount": float(discount),
-                "final_amount": float(max(Decimal("0.00"), amount - discount)),
-                "message": f"Coupon applied! You save ₹{discount}.",
-            }
+            {"is_valid": False, "message": "Coupon system has been retired."},
+            status=status.HTTP_400_BAD_REQUEST,
         )

@@ -6,7 +6,6 @@ from django.utils import timezone
 from .models import Booking
 from turfs.models import Turf, TimeSlot
 from payments.models import Payment
-from promotions.models import Coupon, CouponUsage
 from pricing.engine import PricingEngine
 from qr_system.services import QRService
 from notifications.models import Notification
@@ -26,16 +25,18 @@ class BookingEngine:
     LOCK_DURATION_MINUTES = 5
 
     @classmethod
-    def lock_slots(cls, turf, date_obj, slot_ids, user):
+    def lock_slots(cls, turf, date_obj, slot_ids, user, lock_token=None):
         """
         Temporarily locks slots during checkout with dynamic lock duration (default 5 mins)
         with atomic row-level locking.
         Validates contiguous time slots to ensure accurate match duration without gaps.
-        Prevents race conditions and double-booking.
+        Prevents race conditions, double-booking, and guest lock collisions.
         """
+        from django.core.cache import cache
         now = timezone.now()
         duration_mins = cls.get_lock_duration_minutes()
         lock_until = now + timedelta(minutes=duration_mins)
+        client_token = lock_token or uuid.uuid4().hex
 
         if getattr(turf, "is_deleted", False) or not getattr(turf, "is_active", True):
             return False, f"Turf arena '{turf.name}' is currently unavailable for reservations."
@@ -111,27 +112,39 @@ class BookingEngine:
                         False,
                         f"Slot {slot.start_time.strftime('%H:%M')} is closed for scheduled maintenance.",
                     )
-                if (
-                    slot.status == "LOCKED"
-                    and not slot.is_lock_expired()
-                    and slot.locked_by != user
-                ):
-                    return (
-                        False,
-                        f"Slot {slot.start_time.strftime('%H:%M')} is temporarily held by another customer.",
-                    )
+                if slot.status == "LOCKED" and not slot.is_lock_expired():
+                    if user and slot.locked_by and slot.locked_by != user:
+                        return (
+                            False,
+                            f"Slot {slot.start_time.strftime('%H:%M')} is temporarily held by another customer.",
+                        )
+                    elif not user and slot.locked_by:
+                        return (
+                            False,
+                            f"Slot {slot.start_time.strftime('%H:%M')} is temporarily held by another customer.",
+                        )
+                    elif not user and not slot.locked_by:
+                        cached_token = cache.get(f"slot_guest_token_{slot.id}")
+                        if cached_token and cached_token != client_token:
+                            return (
+                                False,
+                                f"Slot {slot.start_time.strftime('%H:%M')} is temporarily held by another customer.",
+                            )
 
             # Apply 5-minute temporary lock — single bulk UPDATE instead of N individual saves
             for slot in slots:
                 slot.status = "LOCKED"
                 slot.locked_until = lock_until
                 slot.locked_by = user
+                if not user:
+                    cache.set(f"slot_guest_token_{slot.id}", client_token, timeout=duration_mins * 60)
             TimeSlot.objects.bulk_update(slots, ["status", "locked_until", "locked_by"])
 
         return True, {
             "locked_until": lock_until.isoformat(),
             "expires_at": lock_until.isoformat(),
             "lock_duration_seconds": duration_mins * 60,
+            "lock_token": client_token,
             "slot_ids": [str(s.id) for s in slots],
             "locked_slots": [
                 {
@@ -270,19 +283,10 @@ class BookingEngine:
                 raise ValueError("Recurring squad & league bookings are currently disabled by administration.")
             if booking_type == "WALK_IN" and not BusinessSettingsHelper.is_feature_enabled("WALK_IN_BOOKINGS"):
                 raise ValueError("Physical ground walk-in bookings are currently disabled by administration.")
-            if payment_type == "PARTIAL" and not BusinessSettingsHelper.is_feature_enabled("PARTIAL_PAYMENTS"):
-                raise ValueError("Split advance deposit payments are currently disabled.")
-            if coupon_code and not BusinessSettingsHelper.is_feature_enabled("COUPONS"):
-                raise ValueError("Promotions and coupons are currently disabled.")
             if payment_method in ["CASH", "OFFLINE"] and not BusinessSettingsHelper.is_feature_enabled("OFFLINE_PAYMENTS"):
                 raise ValueError("Offline / cash payments are currently disabled.")
             if payment_method in ["RAZORPAY", "ONLINE"] and not BusinessSettingsHelper.is_feature_enabled("ONLINE_PAYMENTS"):
                 raise ValueError("Online gateway payments are currently disabled.")
-
-            # Validate coupon if given
-            coupon = None
-            if coupon_code:
-                coupon = Coupon.objects.filter(code__iexact=coupon_code.strip()).first()
 
             slot_items = [
                 {"start_time": s.start_time, "end_time": s.end_time} for s in slots
@@ -291,7 +295,6 @@ class BookingEngine:
                 turf=turf,
                 date_obj=date_obj,
                 slot_items=slot_items,
-                coupon=coupon,
                 user=user,
             )
 
@@ -347,7 +350,7 @@ class BookingEngine:
                 final_amount=final_amt,
                 amount_paid=amt_paid,
                 balance_due=balance,
-                coupon_code=coupon.code if coupon else "",
+                coupon_code="",
                 pricing_breakdown=price_data,
                 participants=participants or [],
                 notes=notes,
@@ -363,17 +366,6 @@ class BookingEngine:
                 slots, ["status", "booking_id", "locked_until", "locked_by"]
             )
             booking.slots.add(*slots)
-
-            # Record coupon usage if applied
-            if coupon:
-                coupon.usage_count += 1
-                coupon.save()
-                CouponUsage.objects.create(
-                    coupon=coupon,
-                    user=user,
-                    booking=booking,
-                    discount_applied=Decimal(str(price_data["coupon_discount"])),
-                )
 
             # Generate QR Ticket
             QRService.generate_qr_for_booking(booking)

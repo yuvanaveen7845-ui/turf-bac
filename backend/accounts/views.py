@@ -53,7 +53,7 @@ DEFAULT_FEATURE_FLAGS = {
     "QR_CHECKIN": True,
     "ONLINE_PAYMENTS": True,
     "OFFLINE_PAYMENTS": True,
-    "COUPONS": True,
+    "COUPONS": False,
     "REVIEWS": True,
     "ADVANCED_REPORTING": True,
 }

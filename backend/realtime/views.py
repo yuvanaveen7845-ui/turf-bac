@@ -58,8 +58,8 @@ def stream_events(request):
         }, event_name="open")
 
         # Yield events quickly to prevent locking WSGI worker threads.
-        # Short burst cycles allow EventSource to reconnect cleanly without thread starvation.
-        for _ in range(6):
+        # Short 1-second burst cycles allow EventSource to reconnect cleanly without thread starvation.
+        for _ in range(2):
             time.sleep(0.5)
             now = time.time()
             heartbeat_counter += 1
@@ -68,7 +68,7 @@ def stream_events(request):
                 last_check = now
                 for ev in new_events:
                     yield format_sse(ev, event_name=ev["type"])
-            elif heartbeat_counter >= 4:
+            elif heartbeat_counter >= 2:
                 heartbeat_counter = 0
                 yield f": heartbeat {now}\n\n"
 

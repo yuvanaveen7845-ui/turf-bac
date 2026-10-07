@@ -144,3 +144,20 @@ class TimeSlot(models.Model):
         if self.status == "LOCKED" and self.locked_until:
             return timezone.now() > self.locked_until
         return False
+
+
+# ─── In-Memory Cache Invalidation Signals ──────────────────────────────────
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+from django.core.cache import cache
+
+@receiver([post_save, post_delete], sender=Turf)
+def invalidate_turfs_cache_on_turf_change(sender, **kwargs):
+    for sport in ["ALL", "FOOTBALL", "CRICKET", "MULTI_SPORT", "BADMINTON", "TENNIS"]:
+        cache.delete(f"turfs_public_list_{sport}")
+
+@receiver([post_save, post_delete], sender=Facility)
+def invalidate_turfs_cache_on_facility_change(sender, **kwargs):
+    for sport in ["ALL", "FOOTBALL", "CRICKET", "MULTI_SPORT", "BADMINTON", "TENNIS"]:
+        cache.delete(f"turfs_public_list_{sport}")
+

@@ -19,10 +19,20 @@ class SchedulingEngine:
     """
 
     @classmethod
-    def cleanup_expired_locks(cls, turf=None, date_obj=None):
+    def cleanup_expired_locks(cls, turf=None, date_obj=None, force=False):
         """
         Releases any temporary slot locks that have passed their expiration timestamp.
+        Throttled by default during read queries to prevent redundant database writes.
         """
+        from django.core.cache import cache
+
+        turf_key = str(getattr(turf, "id", turf) or "all")
+        date_key = str(date_obj or "all")
+        throttle_key = f"lock_cleanup_cooldown_{turf_key}_{date_key}"
+
+        if not force and cache.get(throttle_key):
+            return 0
+
         now = timezone.now()
         qs = TimeSlot.objects.filter(status="LOCKED", locked_until__lt=now)
         if turf:
@@ -44,6 +54,7 @@ class SchedulingEngine:
                         "slot_ids": [str(s.id)],
                     },
                 )
+        cache.set(throttle_key, 1, timeout=15)
         return count
 
     @classmethod

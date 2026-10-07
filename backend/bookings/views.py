@@ -20,7 +20,6 @@ from .serializers import (
 )
 from .services import BookingEngine
 from pricing.engine import PricingEngine
-from promotions.models import Coupon
 from accounts.models import User
 from accounts.permissions import IsStaffOrAdmin, IsAdmin
 from realtime.events import publish_event
@@ -33,7 +32,6 @@ class PricePreviewView(views.APIView):
         turf_id = request.data.get("turf_id")
         date_str = request.data.get("date")
         slot_ids = request.data.get("slot_ids", [])
-        coupon_code = request.data.get("coupon_code", "").strip()
 
         if not turf_id or not date_str or not slot_ids:
             return Response(
@@ -55,29 +53,12 @@ class PricePreviewView(views.APIView):
         ]
 
         active_user = request.user if request.user.is_authenticated else None
-        coupon = None
-        coupon_error = None
-        if coupon_code:
-            coupon = Coupon.objects.filter(code__iexact=coupon_code).first()
-            if not coupon:
-                coupon_error = "Invalid coupon code."
-            else:
-                # Preview coupon validity
-                valid, msg = coupon.is_valid_for_user(
-                    active_user, float(turf.base_price) * len(slots)
-                )
-                if not valid:
-                    coupon_error = msg
-                    coupon = None
-
         breakdown = PricingEngine.calculate_booking_total(
             turf=turf,
             date_obj=date_obj,
             slot_items=slot_items,
-            coupon=coupon,
             user=active_user,
         )
-        breakdown["coupon_error"] = coupon_error
         return Response(breakdown)
 
 
@@ -92,12 +73,14 @@ class LockSlotView(views.APIView):
         data = serializer.validated_data
         turf = get_object_or_404(Turf, pk=data["turf_id"])
         active_user = request.user if request.user.is_authenticated else None
+        lock_token = data.get("lock_token") or request.data.get("lock_token")
 
         success, result = BookingEngine.lock_slots(
             turf=turf,
             date_obj=data["date"],
             slot_ids=data["slot_ids"],
             user=active_user,
+            lock_token=lock_token,
         )
         if not success:
             return Response({"error": result}, status=status.HTTP_409_CONFLICT)

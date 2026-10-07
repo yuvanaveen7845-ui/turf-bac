@@ -15,17 +15,51 @@ class PricingEngine:
     TAX_RATE_PERCENTAGE = Decimal("18.00")
 
     @classmethod
+    def invalidate_pricing_cache(cls, turf=None):
+        """
+        Atomically busts all cached pricing contexts across all dates and turfs,
+        and broadcasts a PRICE_CHANGED real-time event to connected clients.
+        """
+        import time
+        from django.core.cache import cache
+        from realtime.events import publish_event
+
+        # Increment version to instantly bust all pricing_ctx_* keys
+        try:
+            cache.incr("pricing_cache_version")
+        except Exception:
+            cache.set("pricing_cache_version", int(time.time()), timeout=None)
+
+        # Invalidate public turfs cache as well
+        for sport in ["ALL", "FOOTBALL", "CRICKET", "MULTI_SPORT", "BADMINTON", "TENNIS"]:
+            cache.delete(f"turfs_public_list_{sport}")
+
+        # Broadcast live price update to customer and staff screens
+        try:
+            publish_event(
+                channel="slots",
+                event_type="PRICE_CHANGED",
+                payload={
+                    "turf_id": str(turf.id) if turf else "all",
+                    "timestamp": time.time(),
+                },
+            )
+        except Exception:
+            pass
+
+    @classmethod
     def get_pricing_context(cls, turf=None, date_obj=None):
         """
         Pre-fetches all pricing rules, holidays, and special events in a single batch.
         Eliminates repeated database roundtrips when calculating slot pricing matrices.
-        Caches in LocMemCache for 60 seconds to provide near-instant retrieval.
+        Caches in LocMemCache with version-based instant invalidation.
         """
         from django.core.cache import cache
 
         turf_key = str(turf.id) if turf else "all"
         date_key = str(date_obj) if date_obj else "nodate"
-        cache_key = f"pricing_ctx_{turf_key}_{date_key}"
+        cache_ver = cache.get("pricing_cache_version", 1)
+        cache_key = f"pricing_ctx_v{cache_ver}_{turf_key}_{date_key}"
 
         cached = cache.get(cache_key)
         if cached is not None:
@@ -47,7 +81,7 @@ class PricingEngine:
             "holiday": holiday,
             "special_event": special_event,
         }
-        cache.set(cache_key, context_data, timeout=60)
+        cache.set(cache_key, context_data, timeout=300)
         return context_data
 
     @classmethod
@@ -62,6 +96,26 @@ class PricingEngine:
         Supports optional pre-fetched pricing_context to avoid N+1 DB queries.
         """
         base_price = Decimal(str(turf.base_price))
+
+        # Defensively normalize start_time_obj and end_time_obj to datetime.time
+        if isinstance(start_time_obj, str):
+            try:
+                start_time_obj = (
+                    datetime.strptime(start_time_obj, "%H:%M:%S").time()
+                    if len(start_time_obj) == 8
+                    else datetime.strptime(start_time_obj[:5], "%H:%M").time()
+                )
+            except Exception:
+                pass
+        if isinstance(end_time_obj, str):
+            try:
+                end_time_obj = (
+                    datetime.strptime(end_time_obj, "%H:%M:%S").time()
+                    if len(end_time_obj) == 8
+                    else datetime.strptime(end_time_obj[:5], "%H:%M").time()
+                )
+            except Exception:
+                pass
 
         # Prorate base price for slot duration (e.g. 30m slot = base_price * 30 / 60)
         if start_time_obj and end_time_obj:
@@ -137,7 +191,9 @@ class PricingEngine:
             )
 
         # 3. Dynamic Pricing Rules (Ordered by -priority)
-        applied_rule_priorities = []
+        applied_rule_types = {}  # Map rule_type -> highest priority applied
+        has_fixed_slot_override = False
+
         for rule in rules:
             # Check turf applicability
             if rule.turf_id and rule.turf_id != turf.id:
@@ -153,16 +209,33 @@ class PricingEngine:
             if rule.applicable_days and day_of_week not in rule.applicable_days:
                 continue
 
-            # Check time range (e.g. peak hours between 18:00 and 23:00)
-            if rule.start_time and rule.end_time:
-                if not (
-                    start_time_obj >= rule.start_time and start_time_obj < rule.end_time
-                ):
+            # Check time range (supports midnight crossing e.g. 22:00 to 02:00, or 22:00 to 00:00)
+            if rule.start_time and rule.end_time and rule.start_time != rule.end_time:
+                if rule.start_time < rule.end_time:
+                    if not (start_time_obj >= rule.start_time and start_time_obj < rule.end_time):
+                        continue
+                else:
+                    # Midnight crossing
+                    if rule.end_time == time(0, 0):
+                        if not (start_time_obj >= rule.start_time):
+                            continue
+                    else:
+                        if not (start_time_obj >= rule.start_time or start_time_obj < rule.end_time):
+                            continue
+            elif rule.start_time and not rule.end_time:
+                if start_time_obj < rule.start_time:
+                    continue
+            elif rule.end_time and not rule.start_time:
+                if start_time_obj >= rule.end_time:
                     continue
 
-            # Priority Resolution: If a rule with strictly higher priority has already
-            # applied for this slot, lower-priority overlapping rules are overridden.
-            if any(prev_priority > rule.priority for prev_priority in applied_rule_priorities):
+            # Conflict resolution:
+            # 1. If an explicit fixed slot override (priority >= 20) was already applied, skip general rules
+            if has_fixed_slot_override and rule.priority < 20:
+                continue
+
+            # 2. A higher-priority rule of the SAME rule_type overrides lower-priority rules of that type
+            if rule.rule_type in applied_rule_types:
                 continue
 
             # Rule applies! Calculate adjustment
@@ -173,7 +246,10 @@ class PricingEngine:
                 adjustment = adj_val
 
             current_price += adjustment
-            applied_rule_priorities.append(rule.priority)
+            applied_rule_types[rule.rule_type] = rule.priority
+            if rule.priority >= 20 and rule.adjustment_type == "FIXED":
+                has_fixed_slot_override = True
+
             applied_rules.append(
                 {"name": rule.name, "type": rule.rule_type, "amount": float(adjustment)}
             )
@@ -212,7 +288,7 @@ class PricingEngine:
         - Explicit discounts & manual price overrides (with role authorization)
         """
         total_base = Decimal("0.00")
-        total_adjustments = Decimal("0.00")
+        subtotal = Decimal("0.00")
         slots_breakdown = []
         pricing_context = cls.get_pricing_context(turf, date_obj)
 
@@ -233,9 +309,10 @@ class PricingEngine:
                 )
 
             calc = cls.calculate_slot_price(turf, date_obj, start_t, end_t, pricing_context=pricing_context)
-            total_base += Decimal(str(calc["base_price"]))
-            slot_adj = sum(Decimal(str(r["amount"])) for r in calc["applied_rules"])
-            total_adjustments += slot_adj
+            slot_base = Decimal(str(calc["base_price"]))
+            slot_price = Decimal(str(calc["slot_price"]))
+            total_base += slot_base
+            subtotal += slot_price
             slots_breakdown.append(
                 {
                     "start_time": start_t.strftime("%H:%M"),
@@ -246,7 +323,7 @@ class PricingEngine:
                 }
             )
 
-        subtotal = total_base + total_adjustments
+        total_adjustments = subtotal - total_base
         discount_sources = []
 
         # Dynamic Membership discount from active subscription or MembershipPlan
@@ -289,24 +366,6 @@ class PricingEngine:
                 "amount": float(membership_discount),
             })
 
-        amount_after_membership = max(Decimal("0.00"), subtotal - membership_discount)
-
-        # Coupon discount
-        coupon_discount = Decimal("0.00")
-        coupon_code = ""
-        if coupon:
-            coupon_code = coupon.code
-            coupon_discount = Decimal(
-                str(coupon.calculate_discount(amount_after_membership))
-            )
-            if coupon_discount > Decimal("0.00"):
-                discount_sources.append({
-                    "source": "COUPON",
-                    "code": coupon.code,
-                    "label": f"Coupon ({coupon.code})",
-                    "amount": float(coupon_discount),
-                })
-
         # Manual discount with actor permission check
         admin_discount = Decimal("0.00")
         if manual_discount:
@@ -324,7 +383,9 @@ class PricingEngine:
                     "actor": actor.email if actor else "Admin",
                 })
 
-        total_discount = membership_discount + coupon_discount + admin_discount
+        coupon_discount = Decimal("0.00")
+        coupon_code = ""
+        total_discount = membership_discount + admin_discount
         discounted_total = max(Decimal("0.00"), subtotal - total_discount)
 
         # Dynamic tax rate percentage from BusinessSetting

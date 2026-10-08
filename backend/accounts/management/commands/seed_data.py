@@ -19,7 +19,19 @@ from wallet.models import WalletTransaction, LoyaltyTransaction
 
 
 class Command(BaseCommand):
-    help = "Seeds complete realistic demo data for Friends Turf"
+    help = "Seeds foundational structural baseline data for Friends Turf"
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--with-demo-bookings",
+            action="store_true",
+            help="Generate synthetic demo bookings for testing",
+        )
+        parser.add_argument(
+            "--with-demo-rules",
+            action="store_true",
+            help="Inject synthetic sample pricing rules / policies",
+        )
 
     def handle(self, *args, **options):
         self.stdout.write(self.style.NOTICE("Seeding Friends Turf database..."))
@@ -374,41 +386,42 @@ class Command(BaseCommand):
         for m in membership_data:
             MembershipPlan.objects.get_or_create(slug=m["slug"], defaults=m)
 
-        # 5. Pricing Rules
-        pricing_rules_data = [
-            {
-                "name": "Weekend Prime Surge",
-                "rule_type": "WEEKEND",
-                "adjustment_type": "PERCENTAGE",
-                "adjustment_value": Decimal("20.00"),
-                "applicable_days": [5, 6],  # Sat, Sun
-                "priority": 15,
-                "is_active": True,
-            },
-            {
-                "name": "Weekday Afternoon Deal",
-                "rule_type": "OFF_PEAK",
-                "adjustment_type": "PERCENTAGE",
-                "adjustment_value": Decimal("-15.00"),
-                "applicable_days": [0, 1, 2, 3, 4],  # Mon-Fri
-                "start_time": time(11, 0),
-                "end_time": time(16, 0),
-                "priority": 12,
-                "is_active": True,
-            },
-            {
-                "name": "Night Floodlight Prime",
-                "rule_type": "PEAK_HOUR",
-                "adjustment_type": "PERCENTAGE",
-                "adjustment_value": Decimal("15.00"),
-                "start_time": time(19, 0),
-                "end_time": time(23, 0),
-                "priority": 10,
-                "is_active": True,
-            },
-        ]
-        for pr in pricing_rules_data:
-            PricingRule.objects.get_or_create(name=pr["name"], defaults=pr)
+        # 5. Pricing Rules (Only injected if explicitly requested via --with-demo-rules)
+        if options.get("with_demo_rules"):
+            pricing_rules_data = [
+                {
+                    "name": "Weekend Prime Surge",
+                    "rule_type": "WEEKEND",
+                    "adjustment_type": "PERCENTAGE",
+                    "adjustment_value": Decimal("20.00"),
+                    "applicable_days": [5, 6],  # Sat, Sun
+                    "priority": 15,
+                    "is_active": True,
+                },
+                {
+                    "name": "Weekday Afternoon Deal",
+                    "rule_type": "OFF_PEAK",
+                    "adjustment_type": "PERCENTAGE",
+                    "adjustment_value": Decimal("-15.00"),
+                    "applicable_days": [0, 1, 2, 3, 4],  # Mon-Fri
+                    "start_time": time(11, 0),
+                    "end_time": time(16, 0),
+                    "priority": 12,
+                    "is_active": True,
+                },
+                {
+                    "name": "Night Floodlight Prime",
+                    "rule_type": "PEAK_HOUR",
+                    "adjustment_type": "PERCENTAGE",
+                    "adjustment_value": Decimal("15.00"),
+                    "start_time": time(19, 0),
+                    "end_time": time(23, 0),
+                    "priority": 10,
+                    "is_active": True,
+                },
+            ]
+            for pr in pricing_rules_data:
+                PricingRule.objects.get_or_create(name=pr["name"], defaults=pr)
 
         # 6. Coupons
         coupons_data = [
@@ -480,149 +493,150 @@ class Command(BaseCommand):
                 SchedulingEngine.generate_daily_slots(turf, day)
         self.stdout.write(self.style.SUCCESS("Generated slots for next 8 days"))
 
-        # 8. Create Realistic Demo Bookings
-        # Booking 1: Upcoming Confirmed Booking for today evening with QR code
-        if len(turf_objs) > 0:
-            try:
-                candidate_slots = list(
-                    TimeSlot.objects.filter(
-                        turf=turf_objs[0], date=today, start_time__gte=time(19, 0), status="AVAILABLE"
-                    ).order_by("start_time")
-                )
-                selected_slots_1 = []
-                acc_mins_1 = 0
-                for s in candidate_slots:
-                    if not selected_slots_1 or selected_slots_1[-1].end_time == s.start_time:
-                        selected_slots_1.append(s)
-                        dur = int(
-                            (
-                                datetime.combine(today + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
-                                - datetime.combine(today, s.start_time)
-                            ).total_seconds()
-                            / 60
-                        )
-                        acc_mins_1 += dur
-                        if acc_mins_1 >= 60:
+        # 8. Demo Bookings (Only injected if explicitly requested via --with-demo-bookings)
+        if options.get("with_demo_bookings"):
+            # Booking 1: Upcoming Confirmed Booking for today evening with QR code
+            if len(turf_objs) > 0:
+                try:
+                    candidate_slots = list(
+                        TimeSlot.objects.filter(
+                            turf=turf_objs[0], date=today, start_time__gte=time(19, 0), status="AVAILABLE"
+                        ).order_by("start_time")
+                    )
+                    selected_slots_1 = []
+                    acc_mins_1 = 0
+                    for s in candidate_slots:
+                        if not selected_slots_1 or selected_slots_1[-1].end_time == s.start_time:
+                            selected_slots_1.append(s)
+                            dur = int(
+                                (
+                                    datetime.combine(today + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                                    - datetime.combine(today, s.start_time)
+                                ).total_seconds()
+                                / 60
+                            )
+                            acc_mins_1 += dur
+                            if acc_mins_1 >= 60:
+                                break
+                        else:
                             break
-                    else:
-                        break
 
-                if selected_slots_1 and acc_mins_1 >= 60:
-                    b1 = BookingEngine.create_booking(
+                    if selected_slots_1 and acc_mins_1 >= 60:
+                        b1 = BookingEngine.create_booking(
+                            turf=turf_objs[0],
+                            date_obj=today,
+                            slot_ids=[str(s.id) for s in selected_slots_1],
+                            user=customer_user,
+                            payment_type="FULL",
+                            payment_method="UPI",
+                            notes="Friends 7v7 friendly match. Need size 5 football.",
+                        )
+                        self.stdout.write(
+                            self.style.SUCCESS(
+                                f"Created Booking 1: {b1.booking_id} (CONFIRMED for Today 19:00)"
+                            )
+                        )
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f"Notice: Seed Booking 1 skipped: {e}"))
+
+            # Booking 2: Checked-In Booking for Today (In Progress)
+            if len(turf_objs) > 1:
+                try:
+                    candidate_slots_2 = list(
+                        TimeSlot.objects.filter(
+                            turf=turf_objs[1], date=today, start_time__gte=time(17, 0), status="AVAILABLE"
+                        ).order_by("start_time")
+                    )
+                    selected_slots_2 = []
+                    acc_mins_2 = 0
+                    for s in candidate_slots_2:
+                        if not selected_slots_2 or selected_slots_2[-1].end_time == s.start_time:
+                            selected_slots_2.append(s)
+                            dur = int(
+                                (
+                                    datetime.combine(today + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
+                                    - datetime.combine(today, s.start_time)
+                                ).total_seconds()
+                                / 60
+                            )
+                            acc_mins_2 += dur
+                            if acc_mins_2 >= 60:
+                                break
+                        else:
+                            break
+
+                    if selected_slots_2 and acc_mins_2 >= 60:
+                        b2 = BookingEngine.create_booking(
+                            turf=turf_objs[1],
+                            date_obj=today,
+                            slot_ids=[str(s.id) for s in selected_slots_2],
+                            user=customer_user,
+                            payment_type="FULL",
+                            payment_method="CARD",
+                            notes="Office cricket tournament practice",
+                        )
+                        # Mark checked in
+                        QRService.validate_and_checkin(
+                            b2.booking_id, staff_user, "VIP Customer, fast pass"
+                        )
+                        self.stdout.write(
+                            self.style.SUCCESS(f"Created Booking 2: {b2.booking_id} (CHECKED_IN)")
+                        )
+                except Exception as e:
+                    self.stdout.write(self.style.WARNING(f"Notice: Seed Booking 2 skipped: {e}"))
+
+            # Booking 3: Completed Booking from 2 days ago with Review
+            if len(turf_objs) > 0:
+                past_date = today - timedelta(days=2)
+                slot_past = TimeSlot.objects.filter(turf=turf_objs[0], date=past_date).first()
+                if not slot_past:
+                    slot_past = TimeSlot.objects.create(
                         turf=turf_objs[0],
-                        date_obj=today,
-                        slot_ids=[str(s.id) for s in selected_slots_1],
-                        user=customer_user,
-                        payment_type="FULL",
-                        payment_method="UPI",
-                        notes="Friends 7v7 friendly match. Need size 5 football.",
+                        date=past_date,
+                        start_time=time(18, 0),
+                        end_time=time(19, 0),
+                        status="BOOKED",
+                        price=turf_objs[0].base_price,
                     )
-                    self.stdout.write(
-                        self.style.SUCCESS(
-                            f"Created Booking 1: {b1.booking_id} (CONFIRMED for Today 19:00)"
-                        )
-                    )
-            except Exception as e:
-                self.stdout.write(self.style.WARNING(f"Notice: Seed Booking 1 skipped: {e}"))
-
-        # Booking 2: Checked-In Booking for Today (In Progress)
-        if len(turf_objs) > 1:
-            try:
-                candidate_slots_2 = list(
-                    TimeSlot.objects.filter(
-                        turf=turf_objs[1], date=today, start_time__gte=time(17, 0), status="AVAILABLE"
-                    ).order_by("start_time")
-                )
-                selected_slots_2 = []
-                acc_mins_2 = 0
-                for s in candidate_slots_2:
-                    if not selected_slots_2 or selected_slots_2[-1].end_time == s.start_time:
-                        selected_slots_2.append(s)
-                        dur = int(
-                            (
-                                datetime.combine(today + timedelta(days=1 if s.end_time <= s.start_time else 0), s.end_time)
-                                - datetime.combine(today, s.start_time)
-                            ).total_seconds()
-                            / 60
-                        )
-                        acc_mins_2 += dur
-                        if acc_mins_2 >= 60:
-                            break
-                    else:
-                        break
-
-                if selected_slots_2 and acc_mins_2 >= 60:
-                    b2 = BookingEngine.create_booking(
-                        turf=turf_objs[1],
-                        date_obj=today,
-                        slot_ids=[str(s.id) for s in selected_slots_2],
-                        user=customer_user,
-                        payment_type="FULL",
-                        payment_method="CARD",
-                        notes="Office cricket tournament practice",
-                    )
-                    # Mark checked in
-                    QRService.validate_and_checkin(
-                        b2.booking_id, staff_user, "VIP Customer, fast pass"
-                    )
-                    self.stdout.write(
-                        self.style.SUCCESS(f"Created Booking 2: {b2.booking_id} (CHECKED_IN)")
-                    )
-            except Exception as e:
-                self.stdout.write(self.style.WARNING(f"Notice: Seed Booking 2 skipped: {e}"))
-
-        # Booking 3: Completed Booking from 2 days ago with Review
-        if len(turf_objs) > 0:
-            past_date = today - timedelta(days=2)
-            slot_past = TimeSlot.objects.filter(turf=turf_objs[0], date=past_date).first()
-            if not slot_past:
-                slot_past = TimeSlot.objects.create(
+                b3 = Booking.objects.create(
+                    booking_id=Booking.generate_booking_id(past_date),
+                    customer=customer_user,
                     turf=turf_objs[0],
                     date=past_date,
                     start_time=time(18, 0),
                     end_time=time(19, 0),
-                    status="BOOKED",
-                    price=turf_objs[0].base_price,
+                    status="COMPLETED",
+                    total_amount=Decimal("1400.00"),
+                    discount_amount=Decimal("140.00"),
+                    tax_amount=Decimal("226.80"),
+                    final_amount=Decimal("1486.80"),
+                    amount_paid=Decimal("1486.80"),
+                    balance_due=Decimal("0.00"),
+                    checked_in_at=timezone.make_aware(datetime.combine(past_date, time(17, 55))),
+                    completed_at=timezone.make_aware(datetime.combine(past_date, time(19, 5))),
                 )
-            b3 = Booking.objects.create(
-                booking_id=Booking.generate_booking_id(past_date),
-                customer=customer_user,
-                turf=turf_objs[0],
-                date=past_date,
-                start_time=time(18, 0),
-                end_time=time(19, 0),
-                status="COMPLETED",
-                total_amount=Decimal("1400.00"),
-                discount_amount=Decimal("140.00"),
-                tax_amount=Decimal("226.80"),
-                final_amount=Decimal("1486.80"),
-                amount_paid=Decimal("1486.80"),
-                balance_due=Decimal("0.00"),
-                checked_in_at=timezone.make_aware(datetime.combine(past_date, time(17, 55))),
-                completed_at=timezone.make_aware(datetime.combine(past_date, time(19, 5))),
-            )
-            b3.slots.add(slot_past)
-            QRService.generate_qr_for_booking(b3)
+                b3.slots.add(slot_past)
+                QRService.generate_qr_for_booking(b3)
 
-            # Add Review for Booking 3
-            Review.objects.get_or_create(
-                booking=b3,
-                defaults={
-                    "customer": customer_user,
-                    "turf": turf_objs[0],
-                    "rating": 5,
-                    "facility_rating": 5,
-                    "staff_rating": 5,
-                    "review_text": "Exceptional pitch quality! The floodlights are bright and non-glaring. The staff welcomed our squad warmly.",
-                    "suggestions": "Add chilled Gatorade in the dugout fridge!",
-                    "admin_response": "Thank you Prajeeth! We have now stocked sports drinks at the counter.",
-                },
-            )
-            self.stdout.write(
-                self.style.SUCCESS(
-                    f"Created Booking 3: {b3.booking_id} (COMPLETED with 5-star Review)"
+                # Add Review for Booking 3
+                Review.objects.get_or_create(
+                    booking=b3,
+                    defaults={
+                        "customer": customer_user,
+                        "turf": turf_objs[0],
+                        "rating": 5,
+                        "facility_rating": 5,
+                        "staff_rating": 5,
+                        "review_text": "Exceptional pitch quality! The floodlights are bright and non-glaring. The staff welcomed our squad warmly.",
+                        "suggestions": "Add chilled Gatorade in the dugout fridge!",
+                        "admin_response": "Thank you Prajeeth! We have now stocked sports drinks at the counter.",
+                    },
                 )
-            )
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"Created Booking 3: {b3.booking_id} (COMPLETED with 5-star Review)"
+                    )
+                )
 
         self.stdout.write(
             self.style.SUCCESS("All Friends Turf demo data successfully seeded!")

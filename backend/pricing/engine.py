@@ -117,6 +117,7 @@ class PricingEngine:
             except Exception:
                 pass
 
+        duration_mins = 60
         # Prorate base price for slot duration (e.g. 30m slot = base_price * 30 / 60)
         if start_time_obj and end_time_obj:
             try:
@@ -133,10 +134,12 @@ class PricingEngine:
                 duration_mins = (eh * 60 + em) - (sh * 60 + sm)
                 if duration_mins < 0:
                     duration_mins += 24 * 60
-                if duration_mins > 0 and duration_mins != 60:
+                if duration_mins <= 0:
+                    duration_mins = 60
+                if duration_mins != 60:
                     base_price = round(base_price * Decimal(str(duration_mins)) / Decimal("60.0"), 2)
             except Exception:
-                pass
+                duration_mins = 60
 
         # Check feature flag for dynamic surge pricing
         if not BusinessSettingsHelper.is_feature_enabled("DYNAMIC_PRICING", default=True):
@@ -238,12 +241,15 @@ class PricingEngine:
             if rule.rule_type in applied_rule_types:
                 continue
 
-            # Rule applies! Calculate adjustment
+            # Rule applies! Calculate adjustment (prorated by duration for fixed amounts)
             adj_val = Decimal(str(rule.adjustment_value))
             if rule.adjustment_type == "PERCENTAGE":
                 adjustment = round((base_price * adj_val) / Decimal("100.00"), 2)
             else:
-                adjustment = adj_val
+                if duration_mins != 60:
+                    adjustment = round((adj_val * Decimal(str(duration_mins))) / Decimal("60.0"), 2)
+                else:
+                    adjustment = adj_val
 
             current_price += adjustment
             applied_rule_types[rule.rule_type] = rule.priority

@@ -257,7 +257,7 @@ class BookingEngine:
             min_duration = int(booking_rules.get("minDurationMinutes", 60))
             if total_duration_minutes < min_duration:
                 raise ValueError(
-                    f"Minimum match duration is {min_duration} minutes (1 hour). Please select at least two consecutive 30-minute slots."
+                    f"Minimum match duration is {min_duration} minutes. Please select sufficient consecutive time slots."
                 )
 
             # Strict availability and lock validation

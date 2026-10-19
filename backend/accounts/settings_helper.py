@@ -19,7 +19,7 @@ DEFAULT_BUSINESS_SETTINGS = {
         "whatsapp": "+91 93639 89494",
         "timezone": "Asia/Kolkata",
         "currency": "INR",
-        "gstin": "33ABCDE1234F1Z5",
+        "gstin": "",
         "logo_url": "/logo.png",
         "banner_title": "Friends Turf Sports Complex",
         "banner_landmark": "RTO Backside",
@@ -54,7 +54,7 @@ DEFAULT_BUSINESS_SETTINGS = {
         "enableSplitDeposit": True,
         "hourlyAdvanceRate": 100.0,
         "advanceDepositPercent": 50,
-        "taxPercentage": 18.0,
+        "taxPercentage": 0.0,
         "isTaxIncluded": True,
         "minSlotPrice": 1.0,
         "minTopUpAmount": 10.0,
@@ -192,7 +192,7 @@ class BusinessSettingsHelper:
     @classmethod
     def get_tax_rate_percentage(cls) -> Decimal:
         payments = cls.get_payment_settings()
-        val = payments.get("taxPercentage", 18.0)
+        val = payments.get("taxPercentage", 0.0)
         return Decimal(str(val))
 
     @classmethod

@@ -70,8 +70,13 @@ class SchedulingEngine:
             return []
 
         start_limit_dt = datetime.combine(date_obj, turf.operating_hours_start)
-        if turf.operating_hours_end <= turf.operating_hours_start:
-            end_limit_dt = datetime.combine(date_obj + timedelta(days=1), turf.operating_hours_end)
+        # Handle 24-hour schedules, overnight hours, and end-of-day closing (23:59 / 00:00)
+        if (
+            turf.operating_hours_end <= turf.operating_hours_start
+            or (turf.operating_hours_end.hour == 23 and turf.operating_hours_end.minute >= 50)
+            or (turf.operating_hours_end.hour == 0 and turf.operating_hours_end.minute == 0)
+        ):
+            end_limit_dt = datetime.combine(date_obj + timedelta(days=1), time(0, 0))
         else:
             end_limit_dt = datetime.combine(date_obj, turf.operating_hours_end)
 
@@ -206,15 +211,21 @@ class SchedulingEngine:
             and now_utc > slot.locked_until
         )
 
-        # Time state evaluation
-        is_past = (
-            slot.date < now_date
-            or (slot.date == now_date and slot.end_time <= now_time)
-        )
-        is_ongoing = (
-            slot.date == now_date
-            and slot.start_time <= now_time < slot.end_time
-        )
+        # Time state evaluation (robust for slots crossing midnight like 23:30 to 00:00)
+        spans_midnight = (slot.end_time <= slot.start_time)
+        if slot.date < now_date:
+            is_past = True
+            is_ongoing = False
+        elif slot.date == now_date:
+            if spans_midnight:
+                is_past = False
+                is_ongoing = (now_time >= slot.start_time)
+            else:
+                is_past = (slot.end_time <= now_time)
+                is_ongoing = (slot.start_time <= now_time < slot.end_time)
+        else:
+            is_past = False
+            is_ongoing = False
 
         # Availability evaluation
         if slot.date < now_date or (slot.date == now_date and slot.start_time <= now_time):

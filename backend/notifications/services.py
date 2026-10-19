@@ -90,45 +90,81 @@ class EmailNotificationService:
             return False
 
         import threading
+        import time
+        from django.db import transaction
         booking_id = getattr(booking_or_id, "booking_id", None) or getattr(booking_or_id, "id", None) or str(booking_or_id)
 
         def _worker():
             from django.db import connection
             try:
                 from bookings.models import Booking
-                if hasattr(booking_or_id, "booking_id"):
-                    b = booking_or_id
-                else:
-                    b = Booking.objects.filter(booking_id=booking_id).first()
-                    if not b and str(booking_id).isdigit():
-                        b = Booking.objects.filter(pk=int(booking_id)).first()
+                b = None
+                for attempt in range(4):
+                    if hasattr(booking_or_id, "booking_id"):
+                        b = booking_or_id
+                        try:
+                            b.refresh_from_db()
+                        except Exception:
+                            pass
+                        break
+                    else:
+                        b = Booking.objects.select_related("customer", "turf").filter(booking_id=booking_id).first()
+                        if not b and str(booking_id).isdigit():
+                            b = Booking.objects.select_related("customer", "turf").filter(pk=int(booking_id)).first()
+                        if b:
+                            break
+                        time.sleep(0.4)
+
                 if b:
                     cls.send_booking_confirmation_email(
                         booking=b,
                         qr_base64=qr_base64,
                         recipient_email=recipient_email,
                     )
+                else:
+                    logger.error(f"Background email dispatcher could not resolve booking {booking_id} after retries.")
             except Exception as ex:
                 logger.error(f"Background email dispatcher failed for booking {booking_id}: {ex}")
             finally:
                 connection.close()
 
-        thread = threading.Thread(target=_worker, name=f"EmailDispatch-{booking_id}", daemon=True)
-        thread.start()
+        def _start_thread():
+            thread = threading.Thread(target=_worker, name=f"EmailDispatch-{booking_id}", daemon=True)
+            thread.start()
+
+        try:
+            if transaction.get_connection().in_atomic_block:
+                transaction.on_commit(_start_thread)
+            else:
+                _start_thread()
+        except Exception:
+            _start_thread()
 
     @classmethod
     def send_booking_confirmation_email(
         cls, booking, qr_base64: str = "", recipient_email: str = ""
     ) -> bool:
         """
-        Sends official match pass confirmation email with turnstile QR pass.
-        If recipient_email is not provided, defaults to booking.customer.email.
+        Sends official match pass confirmation email with turnstile QR pass via SMTP.
+        Unconditionally delivers to friendsturftirupur@gmail.com for every booking (advance or full),
+        and also delivers to booking.customer.email if present and valid.
         Embeds QR pass as an inline MIME image (cid:match_pass_qr) for flawless display in Gmail/Outlook.
         """
-        target_email = (recipient_email or getattr(booking.customer, "email", "") or "").strip()
-        if not target_email:
-            logger.warning(f"Cannot send match pass email for booking {booking.booking_id}: no email address found.")
-            return False
+        ADMIN_NOTIFICATION_EMAIL = "friendsturftirupur@gmail.com"
+        customer = getattr(booking, "customer", None)
+        target_email = (recipient_email or (getattr(customer, "email", "") if customer else "") or "").strip()
+
+        # Build recipient list — friendsturftirupur@gmail.com is unconditionally required on all booking confirmations
+        recipients = [ADMIN_NOTIFICATION_EMAIL]
+        if (
+            target_email
+            and target_email.lower() != ADMIN_NOTIFICATION_EMAIL.lower()
+            and not target_email.startswith("guest_")
+            and not target_email.startswith("walkin_")
+            and "@" in target_email
+            and "." in target_email.split("@")[-1]
+        ):
+            recipients.append(target_email)
 
         # If QR code was not provided, fetch or generate it dynamically
         if not qr_base64:
@@ -146,10 +182,16 @@ class EmailNotificationService:
             has_qr = bool(qr_base64)
             qr_image_src = "cid:match_pass_qr" if has_qr else ""
             html_content = render_booking_confirmation_email(booking, qr_image_src=qr_image_src)
+            paid_info = (
+                f"Amount Paid: ₹{booking.amount_paid} | Balance Due: ₹{booking.balance_due}"
+                if getattr(booking, "balance_due", 0) > 0
+                else f"Amount Paid: ₹{booking.final_amount} (Full Payment Received)"
+            )
             plain_text = (
                 f"Your match pass for {booking.turf.name} on {match_date_str} is confirmed.\n"
                 f"Booking ID: {booking.booking_id}\n"
                 f"Timing: {booking.start_time.strftime('%I:%M %p')} - {booking.end_time.strftime('%I:%M %p')}\n"
+                f"Payment Status: {paid_info}\n"
                 f"Location: {booking.turf.location}\n"
                 f"Present your match pass code #{booking.booking_id} at the gate turnstile scanner."
             )
@@ -162,7 +204,7 @@ class EmailNotificationService:
                 subject=subject,
                 body=plain_text,
                 from_email=from_email,
-                to=[target_email],
+                to=recipients,
             )
             msg.attach_alternative(html_content, "text/html")
 
@@ -178,42 +220,50 @@ class EmailNotificationService:
                 except Exception as img_err:
                     logger.warning(f"Could not attach inline QR image to email: {img_err}")
 
-            sent_count = msg.send(fail_silently=True)
+            sent_count = msg.send(fail_silently=False)
             if sent_count:
-                logger.info(f"Successfully sent match pass email for {booking.booking_id} to {target_email}")
+                logger.info(f"Successfully sent match pass email for {booking.booking_id} to {recipients}")
                 return True
             else:
-                logger.warning(f"SMTP mail backend returned 0 sent messages for {booking.booking_id} to {target_email}")
+                logger.warning(f"SMTP mail backend returned 0 sent messages for {booking.booking_id} to {recipients}")
                 return False
         except Exception as e:
-            logger.error(f"Failed to send booking confirmation email to {target_email}: {e}")
+            logger.error(f"Failed to send booking confirmation email to {recipients}: {e}")
             return False
 
 
     @classmethod
     def send_receipt_invoice_email(cls, receipt_data: dict):
-        """Sends official GST Tax Invoice email."""
-        recipient_email = receipt_data.get("customer", {}).get("email")
-        if not recipient_email:
-            return False
+        """Sends official booking receipt email."""
+        ADMIN_NOTIFICATION_EMAIL = "friendsturftirupur@gmail.com"
+        customer_email = (receipt_data.get("customer", {}).get("email") or "").strip()
+        recipients = [ADMIN_NOTIFICATION_EMAIL]
+        if (
+            customer_email
+            and customer_email.lower() != ADMIN_NOTIFICATION_EMAIL.lower()
+            and not customer_email.startswith("guest_")
+            and not customer_email.startswith("walkin_")
+            and "@" in customer_email
+        ):
+            recipients.append(customer_email)
 
         try:
             receipt_no = receipt_data.get("receipt_number", "REC-26-0000")
-            subject = f"Official GST Tax Invoice ({receipt_no}) — Friends Turf"
+            subject = f"Official Booking Receipt ({receipt_no}) — Friends Turf"
             html_content = render_payment_receipt_email(receipt_data)
-            plain_text = f"Official payment receipt {receipt_no} for Friends Turf booking. View in your portal."
+            plain_text = f"Official booking receipt {receipt_no} for Friends Turf booking. View in your portal."
 
             msg = EmailMultiAlternatives(
                 subject=subject,
                 body=plain_text,
                 from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "Friends Turf <support@friendsturf.com>"),
-                to=[recipient_email],
+                to=recipients,
             )
             msg.attach_alternative(html_content, "text/html")
             msg.send(fail_silently=True)
             return True
         except Exception as e:
-            logger.error(f"Failed to send receipt email to {recipient_email}: {e}")
+            logger.error(f"Failed to send receipt email to {recipients}: {e}")
             return False
 
 

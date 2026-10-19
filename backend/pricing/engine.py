@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from django.db.models import Q
 from django.utils import timezone
@@ -11,8 +11,8 @@ class PricingEngine:
     def get_tax_rate_percentage(cls) -> Decimal:
         return BusinessSettingsHelper.get_tax_rate_percentage()
 
-    # Backward compatibility property/attribute alias
-    TAX_RATE_PERCENTAGE = Decimal("18.00")
+    # Backward compatibility property/attribute alias (GST completely removed)
+    TAX_RATE_PERCENTAGE = Decimal("0.00")
 
     @classmethod
     def invalidate_pricing_cache(cls, turf=None):
@@ -456,4 +456,71 @@ class PricingEngine:
             "override_reason": override_reason if is_overridden else "",
             "override_actor": actor.email if (is_overridden and actor) else "",
             "slots_breakdown": slots_breakdown,
+        }
+
+    @classmethod
+    def get_turf_price_range(cls, turf) -> dict:
+        """
+        Calculates the minimum and maximum hourly price for a given turf.
+        Checks future generated slots or computes based on base_price and active PricingRules.
+        Returns a dict: {"min_price": float, "max_price": float}
+        """
+        base_hourly = float(turf.base_price)
+        min_p = base_hourly
+        max_p = base_hourly
+
+        # Check future slots in next 7 days for actual dynamic prices
+        try:
+            from turfs.models import TimeSlot
+            today = timezone.now().date()
+            future_slots = list(
+                TimeSlot.objects.filter(
+                    turf=turf,
+                    date__gte=today,
+                    date__lte=today + timedelta(days=7),
+                ).values("price", "start_time", "end_time")[:100]
+            )
+
+            if future_slots:
+                hourly_rates = []
+                for s in future_slots:
+                    pr = float(s["price"])
+                    st = s["start_time"]
+                    et = s["end_time"]
+                    st_m = st.hour * 60 + st.minute
+                    et_m = et.hour * 60 + et.minute
+                    dur = et_m - st_m
+                    if dur <= 0:
+                        dur += 24 * 60
+                    dur = max(dur, 1)
+                    hourly_equivalent = round(pr * (60.0 / dur), 2)
+                    hourly_rates.append(hourly_equivalent)
+
+                if hourly_rates:
+                    min_p = min(hourly_rates)
+                    max_p = max(hourly_rates)
+        except Exception:
+            pass
+
+        # Fallback/validation against active pricing rules
+        try:
+            rules = PricingRule.objects.filter(
+                Q(turf=turf) | Q(turf__isnull=True),
+                is_active=True,
+            )
+            for r in rules:
+                val = float(r.adjustment_value)
+                if r.adjustment_type == "PERCENTAGE":
+                    adjusted = base_hourly * (1.0 + (val / 100.0))
+                else:
+                    adjusted = base_hourly + val
+                adjusted = max(0.0, round(adjusted, 2))
+                min_p = min(min_p, adjusted)
+                max_p = max(max_p, adjusted)
+        except Exception:
+            pass
+
+        return {
+            "min_price": float(min_p),
+            "max_price": float(max_p),
         }

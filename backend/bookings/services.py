@@ -401,11 +401,45 @@ class BookingEngine:
                 data={"booking_id": booking.booking_id},
             )
 
+            # In-App notification to Admin & Turf Management
+            try:
+                from accounts.models import User
+                management_users = User.objects.filter(role__in=["ADMIN", "STAFF"], is_active=True).exclude(pk=user.pk if user else None)
+                admin_notifs = [
+                    Notification(
+                        user=admin_u,
+                        notification_type="NEW_BOOKING",
+                        title=f"New Booking: {turf.name} (#{booking.booking_id})",
+                        message=f"Booking confirmed for {getattr(user, 'full_name', '') or getattr(user, 'email', 'Customer')} on {date_obj.strftime('%d %b %Y')} ({start_time.strftime('%I:%M %p')}-{end_time.strftime('%I:%M %p')}). Paid: ₹{amt_paid}.",
+                        data={"booking_id": booking.booking_id, "amount_paid": float(amt_paid), "turf_name": turf.name},
+                    )
+                    for admin_u in management_users
+                ]
+                if admin_notifs:
+                    Notification.objects.bulk_create(admin_notifs)
+            except Exception as notif_err:
+                pass
+
             if b_status == "CONFIRMED":
                 try:
                     EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
                 except Exception as mail_err:
-                    logger.warning(f"Async email dispatch warning in create_booking: {mail_err}")
+                    pass
+
+                try:
+                    from realtime.events import publish_event
+                    publish_event(
+                        channel="bookings",
+                        event_type="BOOKING_CONFIRMED",
+                        payload={
+                            "booking_id": booking.booking_id,
+                            "turf_name": turf.name,
+                            "amount_paid": float(amt_paid),
+                            "date": str(date_obj),
+                        },
+                    )
+                except Exception:
+                    pass
 
             AuditLog.objects.create(
                 user=user,
@@ -736,6 +770,31 @@ class BookingEngine:
                 message=f"Offline payment of ₹{pay_amt} via {payment_method} recorded{collector_info}. Balance due: ₹{booking.balance_due}.",
                 data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
             )
+
+            # In-App notification to Admin & Turf Management
+            try:
+                from accounts.models import User
+                management_users = User.objects.filter(role__in=["ADMIN", "STAFF"], is_active=True).exclude(pk=collected_by.pk if collected_by else None)
+                admin_notifs = [
+                    Notification(
+                        user=admin_u,
+                        notification_type="PAYMENT_RECEIVED",
+                        title=f"Payment Recorded: {booking.turf.name} (#{booking.booking_id})",
+                        message=f"₹{pay_amt} recorded via {payment_method} for {getattr(booking.customer, 'full_name', '') or getattr(booking.customer, 'email', 'Customer')}. Balance: ₹{booking.balance_due}.",
+                        data={"booking_id": booking.booking_id, "amount_paid": float(pay_amt)},
+                    )
+                    for admin_u in management_users
+                ]
+                if admin_notifs:
+                    Notification.objects.bulk_create(admin_notifs)
+            except Exception:
+                pass
+
+            # Dispatch branded confirmation email to customer + friendsturftirupur@gmail.com
+            try:
+                EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
+            except Exception as mail_err:
+                pass
 
             AuditLog.objects.create(
                 user=collected_by or booking.customer,

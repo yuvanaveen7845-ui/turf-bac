@@ -476,22 +476,34 @@ class StaffWalkInBookingView(views.APIView):
 
         # Find or create customer account
         guest_user = None
-        if customer_phone:
+        customer_email = (request.data.get("customer_email") or "").strip()
+        if customer_email and "@" in customer_email:
+            guest_user = User.objects.filter(email__iexact=customer_email).first()
+
+        if not guest_user and customer_phone:
             clean_phone = User.canonicalize_phone(customer_phone)
             guest_user = User.objects.filter(phone=clean_phone).first() or User.objects.filter(phone=customer_phone).first()
 
         if not guest_user:
             slug = re.sub(r"[^\d]", "", customer_phone) if customer_phone else timezone.now().strftime("%Y%m%d%H%M%S")
-            email = f"walkin_{slug}_{uuid.uuid4().hex[:4]}@friendsturf.local"
+            email = customer_email if (customer_email and "@" in customer_email and not User.objects.filter(email__iexact=customer_email).exists()) else f"walkin_{slug}_{uuid.uuid4().hex[:4]}@friendsturf.local"
             guest_user = User.objects.create(
                 email=email,
                 first_name=customer_name or "Walk-in Guest",
                 phone=customer_phone,
                 role="CUSTOMER",
             )
-        elif customer_name and guest_user.first_name in ("Walk-in Guest", ""):
-            guest_user.first_name = customer_name
-            guest_user.save()
+        else:
+            changed = False
+            if customer_name and guest_user.first_name in ("Walk-in Guest", ""):
+                guest_user.first_name = customer_name
+                changed = True
+            if customer_email and "@" in customer_email and guest_user.email.endswith("@friendsturf.local"):
+                if not User.objects.filter(email__iexact=customer_email).exclude(pk=guest_user.pk).exists():
+                    guest_user.email = customer_email
+                    changed = True
+            if changed:
+                guest_user.save()
 
         # Walk-in via Razorpay: Create a PAYMENT_PENDING booking with server-calculated order
         if payment_method == "RAZORPAY":

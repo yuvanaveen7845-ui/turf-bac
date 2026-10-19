@@ -15,6 +15,7 @@ import uuid
 from django.db import transaction
 from payments.models import Payment
 from realtime.events import publish_event
+from notifications.services import EmailNotificationService
 
 
 class QRCollectBalanceAndAdmitView(views.APIView):
@@ -106,6 +107,12 @@ class QRCollectBalanceAndAdmitView(views.APIView):
 
             # Ensure QR credential is valid and active
             QRService.generate_qr_for_booking(booking)
+
+        # Ensure updated 100% settled match pass email is dispatched to player and friendsturftirupur@gmail.com
+        try:
+            EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
+        except Exception:
+            pass
 
         # Now perform gate admission
         admit_result = QRService.evaluate_and_checkin(

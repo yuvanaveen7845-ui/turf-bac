@@ -612,6 +612,24 @@ class VerifyRazorpayPaymentView(views.APIView):
             data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
         )
 
+        try:
+            from accounts.models import User
+            management_users = User.objects.filter(role__in=["ADMIN", "STAFF"], is_active=True).exclude(pk=booking.customer.pk if booking.customer else None)
+            admin_notifs = [
+                Notification(
+                    user=admin_u,
+                    notification_type="NEW_BOOKING",
+                    title=f"New Payment: {booking.turf.name} (#{booking.booking_id})",
+                    message=f"Payment of ₹{payment.amount} received from {getattr(booking.customer, 'full_name', '') or getattr(booking.customer, 'email', 'Customer')}. Remaining balance: ₹{booking.balance_due}.",
+                    data={"booking_id": booking.booking_id, "amount_paid": float(payment.amount)},
+                )
+                for admin_u in management_users
+            ]
+            if admin_notifs:
+                Notification.objects.bulk_create(admin_notifs)
+        except Exception:
+            pass
+
         # Dispatch branded Match Pass email asynchronously via background daemon thread
         try:
             EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
@@ -844,6 +862,29 @@ class VerifyBalanceRazorpayPaymentView(views.APIView):
             data={"booking_id": booking.booking_id, "payment_id": payment.payment_id},
         )
 
+        try:
+            from accounts.models import User
+            management_users = User.objects.filter(role__in=["ADMIN", "STAFF"], is_active=True).exclude(pk=booking.customer.pk if booking.customer else None)
+            admin_notifs = [
+                Notification(
+                    user=admin_u,
+                    notification_type="BOOKING_CONFIRMED",
+                    title=f"Balance Settled: {booking.turf.name} (#{booking.booking_id})",
+                    message=f"Remaining balance of ₹{payment.amount} settled via Razorpay by {getattr(booking.customer, 'full_name', '') or getattr(booking.customer, 'email', 'Customer')}. 100% paid.",
+                    data={"booking_id": booking.booking_id, "amount_paid": float(payment.amount)},
+                )
+                for admin_u in management_users
+            ]
+            if admin_notifs:
+                Notification.objects.bulk_create(admin_notifs)
+        except Exception:
+            pass
+
+        try:
+            EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
+        except Exception as e:
+            logger.warning(f"Async email dispatch failed in verify balance view: {e}")
+
         AuditLog.objects.create(
             user=request.user if request.user.is_authenticated else booking.customer,
             action="BALANCE_PAYMENT_VERIFIED",
@@ -970,6 +1011,10 @@ class RazorpayCallbackView(views.APIView):
                         QRService.generate_qr_for_booking(booking)
                     except Exception:
                         pass
+                    try:
+                        EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
+                    except Exception as mail_err:
+                        logger.warning(f"Async email dispatch failed in callback balance view: {mail_err}")
                     return HttpResponseRedirect(f"{frontend_url}/confirmation/{booking.booking_id}")
                 else:
                     booking.amount_paid = min(booking.final_amount, booking.amount_paid + payment.amount)
@@ -1892,8 +1937,26 @@ class ManualCollectPaymentView(views.APIView):
         # Generate QR match pass if eligible
         QRService.generate_qr_for_booking(booking)
         try:
-            EmailNotificationService.send_booking_confirmation_email(booking)
+            EmailNotificationService.send_booking_confirmation_email_async(booking.booking_id)
         except Exception as e:
+            pass
+
+        try:
+            from accounts.models import User
+            management_users = User.objects.filter(role__in=["ADMIN", "STAFF"], is_active=True).exclude(pk=request.user.pk)
+            admin_notifs = [
+                Notification(
+                    user=admin_u,
+                    notification_type="PAYMENT_RECEIVED",
+                    title=f"Manual Payment: {booking.turf.name} (#{booking.booking_id})",
+                    message=f"₹{amount} collected via {payment_method} by {request.user.email}. Remaining balance: ₹{booking.balance_due}.",
+                    data={"booking_id": booking.booking_id, "amount_paid": float(amount)},
+                )
+                for admin_u in management_users
+            ]
+            if admin_notifs:
+                Notification.objects.bulk_create(admin_notifs)
+        except Exception:
             pass
 
         AuditLog.objects.create(

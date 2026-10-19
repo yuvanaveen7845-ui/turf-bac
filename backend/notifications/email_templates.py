@@ -118,7 +118,12 @@ def render_booking_confirmation_email(booking, qr_image_src: str = "cid:match_pa
     turf_location = booking.turf.location
     surface_spec = getattr(booking.turf, "surface_spec", "FIFA Certified Pro Turf")
     lighting_spec = getattr(booking.turf, "lighting_spec", "500 Lux Anti-Glare LED")
-    customer_name = booking.customer.full_name or booking.customer.email or "Squad Lead"
+    customer = getattr(booking, "customer", None)
+    customer_name = (
+        getattr(customer, "full_name", "")
+        or getattr(customer, "email", "")
+        or "Squad Lead"
+    ) if customer else "Squad Lead"
     amount_paid = float(booking.amount_paid or 0)
     balance_due = float(booking.balance_due or 0)
     total_amount = float(booking.final_amount or booking.total_amount or (amount_paid + balance_due))
@@ -266,7 +271,7 @@ def render_booking_confirmation_email(booking, qr_image_src: str = "cid:match_pa
         </a>
         <span style="color: #CBD5E1;">•</span>
         <a href="{frontend_url}/print/receipt/{booking_id}?autoprint=true" target="_blank" style="font-size: 12px; font-weight: 700; color: #0F172A; text-decoration: none; margin: 0 10px;">
-          🧾 GST Tax Invoice
+          🧾 Booking Receipt
         </a>
         <span style="color: #CBD5E1;">•</span>
         <a href="https://maps.google.com/?q={turf_name}+{turf_location}" target="_blank" style="font-size: 12px; font-weight: 700; color: #475569; text-decoration: none; margin: 0 10px;">
@@ -284,26 +289,25 @@ def render_booking_confirmation_email(booking, qr_image_src: str = "cid:match_pa
 
 
 def render_payment_receipt_email(receipt_data: dict) -> str:
-    """Branded GST Tax Invoice & Cash Receipt HTML email."""
+    """Branded Booking Receipt & Payment Confirmation HTML email."""
     receipt_no = receipt_data.get("receipt_number", "REC-26-0000")
     booking_id = receipt_data.get("booking", {}).get("booking_id", "")
     customer_name = receipt_data.get("customer", {}).get("name", "Valued Player")
     turf_name = receipt_data.get("booking", {}).get("turf_name", "Turf Arena")
     fin = receipt_data.get("financial_summary", {})
     final_amount = fin.get("final_amount", 0.0)
-    tax_amount = fin.get("gst_amount", 0.0)
-    base_amount = fin.get("base_subtotal", 0.0)
+    base_amount = fin.get("base_subtotal", final_amount)
 
     content = f"""
       <div style="text-align: center; margin-bottom: 24px;">
         <span style="background-color: #ECFDF5; border: 1px solid #A7F3D0; color: #059669; font-size: 11px; font-weight: 800; text-transform: uppercase; padding: 4px 12px; border-radius: 9999px;">
-          Official Tax Invoice
+          Official Booking Receipt
         </span>
         <h1 style="color: #0F172A; font-size: 24px; font-weight: 900; margin: 12px 0 4px 0;">
           Payment Received: ₹{final_amount:,.2f}
         </h1>
         <p style="color: #64748B; font-size: 13px; margin: 0;">
-          Invoice No: <strong style="font-family: monospace; color: #0F172A;">{receipt_no}</strong> | Booking: <strong>{booking_id}</strong>
+          Receipt No: <strong style="font-family: monospace; color: #0F172A;">{receipt_no}</strong> | Booking: <strong>{booking_id}</strong>
         </p>
       </div>
 
@@ -312,10 +316,6 @@ def render_payment_receipt_email(receipt_data: dict) -> str:
         <tr style="border-bottom: 1px solid #E2E8F0;">
           <td style="font-size: 12px; color: #64748B;">Match Slot Reservation ({turf_name})</td>
           <td align="right" style="font-size: 13px; font-weight: 700; color: #0F172A;">₹{base_amount:,.2f}</td>
-        </tr>
-        <tr style="border-bottom: 1px solid #E2E8F0;">
-          <td style="font-size: 12px; color: #64748B;">Statutory GST (18% - SAC 999651 Included)</td>
-          <td align="right" style="font-size: 13px; font-weight: 700; color: #0F172A;">₹{tax_amount:,.2f}</td>
         </tr>
         <tr>
           <td style="font-size: 14px; font-weight: 900; color: #0F172A;">Total Paid</td>
@@ -328,7 +328,7 @@ def render_payment_receipt_email(receipt_data: dict) -> str:
         <tr>
           <td align="center">
             <a href="https://friendsturf.com/print/receipt/{booking_id}?autoprint=true" style="display: inline-block; background-color: #0F172A; color: #FFFFFF; font-weight: 800; font-size: 13px; text-decoration: none; padding: 12px 28px; border-radius: 12px;">
-              Download Official GST Tax Invoice PDF →
+              Download Official Receipt PDF →
             </a>
           </td>
         </tr>
@@ -336,7 +336,7 @@ def render_payment_receipt_email(receipt_data: dict) -> str:
     """
 
     return _base_email_wrapper(
-        title=f"GST Tax Invoice {receipt_no} — Friends Turf",
+        title=f"Booking Receipt {receipt_no} — Friends Turf",
         preheader=f"Official receipt for payment of ₹{final_amount:,.2f} on Booking #{booking_id}.",
         content_html=content,
     )

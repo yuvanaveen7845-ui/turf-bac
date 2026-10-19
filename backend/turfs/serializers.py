@@ -18,6 +18,9 @@ class TurfSerializer(serializers.ModelSerializer):
         required=False,
     )
 
+    min_price = serializers.SerializerMethodField()
+    max_price = serializers.SerializerMethodField()
+
     class Meta:
         model = Turf
         fields = [
@@ -29,6 +32,8 @@ class TurfSerializer(serializers.ModelSerializer):
             "location",
             "address",
             "base_price",
+            "min_price",
+            "max_price",
             "capacity",
             "surface_spec",
             "is_fifa_certified",
@@ -48,7 +53,21 @@ class TurfSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "rating", "total_reviews", "created_at", "updated_at"]
+        read_only_fields = ["id", "rating", "total_reviews", "min_price", "max_price", "created_at", "updated_at"]
+
+    def _get_range(self, obj):
+        range_data = getattr(obj, "_price_range", None)
+        if range_data is None:
+            from pricing.engine import PricingEngine
+            range_data = PricingEngine.get_turf_price_range(obj)
+            obj._price_range = range_data
+        return range_data
+
+    def get_min_price(self, obj):
+        return self._get_range(obj).get("min_price", float(obj.base_price))
+
+    def get_max_price(self, obj):
+        return self._get_range(obj).get("max_price", float(obj.base_price))
 
     def validate_images(self, value):
         if value is None:
@@ -112,14 +131,18 @@ class TimeSlotSerializer(serializers.ModelSerializer):
         if obj.date < current_date:
             return True
         if obj.date == current_date:
-            # Slot has ended or started in the past
+            if obj.end_time <= obj.start_time:
+                # Slot spans midnight and concludes tomorrow at 00:00 (not in the past today)
+                return False
             return obj.end_time <= current_time
         return False
 
     def get_is_ongoing(self, obj):
         current_date, current_time = self._get_time_context()
-        if obj.date == current_date and obj.start_time <= current_time < obj.end_time:
-            return True
+        if obj.date == current_date:
+            if obj.end_time <= obj.start_time:
+                return current_time >= obj.start_time
+            return obj.start_time <= current_time < obj.end_time
         return False
 
     def get_is_available(self, obj):
@@ -138,14 +161,26 @@ class TimeSlotSerializer(serializers.ModelSerializer):
     def get_slot_state(self, obj):
         current_date, current_time = self._get_time_context()
 
-        # 1. Past check
-        if obj.date < current_date or (obj.date == current_date and obj.end_time <= current_time):
+        # 1. Past check (robust for midnight rollover)
+        spans_midnight = (obj.end_time <= obj.start_time)
+        is_past = (
+            obj.date < current_date
+            or (obj.date == current_date and not spans_midnight and obj.end_time <= current_time)
+        )
+        if is_past:
             if obj.status == "BOOKED":
                 return "COMPLETED"
             return "PAST"
 
         # 2. Ongoing check
-        if obj.date == current_date and obj.start_time <= current_time < obj.end_time:
+        is_ongoing = False
+        if obj.date == current_date:
+            if spans_midnight:
+                is_ongoing = (current_time >= obj.start_time)
+            else:
+                is_ongoing = (obj.start_time <= current_time < obj.end_time)
+
+        if is_ongoing:
             return "ONGOING"
 
         # 3. Status checks

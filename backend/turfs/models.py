@@ -76,6 +76,7 @@ class Turf(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        ordering = ["name"]
         indexes = [
             models.Index(fields=["is_active", "sport_type"], name="turf_active_sport_idx"),
             models.Index(fields=["is_deleted", "is_active"], name="turf_del_act_idx"),

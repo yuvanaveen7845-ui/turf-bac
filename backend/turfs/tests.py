@@ -429,5 +429,50 @@ class TurfAPITests(TestCase):
             self.assertLessEqual(slots[i]["end_time"], slots[i + 1]["start_time"])
 
 
+class TurfOrderingTests(TestCase):
+    def test_turfs_ordered_by_name_alphabetically_and_numerically(self):
+        """Turfs must always be ordered by name so Ground 1 precedes Ground 2 even if created later."""
+        from rest_framework.test import APIClient
+        client = APIClient()
+
+        # Delete any pre-existing turfs to ensure clean state
+        Turf.objects.all().delete()
+
+        # Intentionally create GROUND 2 first (lower ID)
+        t2 = Turf.objects.create(
+            name="GROUND 2",
+            slug="ground-2",
+            sport_type="CRICKET",
+            base_price=Decimal("900.00"),
+            operating_hours_start=time(6, 0),
+            operating_hours_end=time(23, 0),
+            slot_duration_minutes=60,
+        )
+
+        # Intentionally create GROUND 1 second (higher ID)
+        t1 = Turf.objects.create(
+            name="GROUND 1",
+            slug="ground-1",
+            sport_type="MULTI_SPORT",
+            base_price=Decimal("800.00"),
+            operating_hours_start=time(6, 0),
+            operating_hours_end=time(23, 0),
+            slot_duration_minutes=60,
+        )
+
+        self.assertLess(t2.id, t1.id, "Precondition: GROUND 2 must have a lower ID than GROUND 1")
+
+        # 1. ORM level check
+        orm_names = list(Turf.objects.values_list("name", flat=True))
+        self.assertEqual(orm_names, ["GROUND 1", "GROUND 2"])
+
+        # 2. API level check
+        response = client.get("/api/turfs/")
+        self.assertEqual(response.status_code, 200)
+        api_names = [t["name"] for t in response.data]
+        self.assertEqual(api_names, ["GROUND 1", "GROUND 2"])
+
+
+
 
 

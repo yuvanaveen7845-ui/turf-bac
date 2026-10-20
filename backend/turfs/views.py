@@ -168,7 +168,7 @@ class TurfListView(views.APIView):
             from django.apps import apps
             ensure_default_turfs(apps.get_app_config("turfs"))
 
-        turfs = Turf.objects.filter(is_deleted=False).prefetch_related("facilities")
+        turfs = Turf.objects.filter(is_deleted=False).prefetch_related("facilities").order_by("name")
         if sport:
             turfs = turfs.filter(sport_type=sport.upper())
         if is_active is not None:
@@ -353,7 +353,7 @@ class DailyScheduleView(views.APIView):
                 )
 
         sport = request.query_params.get("sport_type")
-        turfs_qs = Turf.objects.filter(is_active=True, is_deleted=False).prefetch_related("facilities")
+        turfs_qs = Turf.objects.filter(is_active=True, is_deleted=False).prefetch_related("facilities").order_by("name")
         if sport and sport.upper() != "ALL":
             turfs_qs = turfs_qs.filter(sport_type=sport.upper())
 

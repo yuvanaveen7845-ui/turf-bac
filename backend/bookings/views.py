@@ -6,6 +6,7 @@ from rest_framework import status, views, permissions
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.db import models
 
 logger = logging.getLogger(__name__)
 
@@ -158,12 +159,22 @@ class BookingListCreateView(views.APIView):
         user = request.user
         tab = request.query_params.get("tab", "upcoming")  # upcoming or past
 
+        base_qs = (
+            Booking.objects.all()
+            if (user.role in ("STAFF", "ADMIN") or user.is_superuser)
+            else Booking.objects.filter(customer=user)
+        ).select_related(
+            "turf", "customer", "qr_credential"
+        ).prefetch_related(
+            "slots", "refunds", "turf__facilities"
+        )
+
+        now_local = timezone.localtime(timezone.now())
+        today = now_local.date()
+        now_time = now_local.time()
+
         if user.role in ("STAFF", "ADMIN") or user.is_superuser:
-            bookings = (
-                Booking.objects.all()
-                .select_related("turf", "customer")
-                .prefetch_related("slots")
-            )
+            bookings = base_qs
             # Optional filters
             turf_filter = request.query_params.get("turf_id")
             if turf_filter:
@@ -174,28 +185,32 @@ class BookingListCreateView(views.APIView):
             date_filter = request.query_params.get("date")
             if date_filter:
                 bookings = bookings.filter(date=date_filter)
+            if "tab" in request.query_params:
+                tab_param = request.query_params.get("tab")
+                if tab_param == "upcoming":
+                    bookings = bookings.filter(
+                        models.Q(date__gt=today) | models.Q(date=today, end_time__gte=now_time),
+                        status__in=["CONFIRMED", "UPCOMING", "PAYMENT_PENDING", "CHECKED_IN", "IN_PROGRESS"],
+                    ).order_by("date", "start_time")
+                elif tab_param == "past":
+                    bookings = bookings.filter(
+                        models.Q(date__lt=today)
+                        | models.Q(date=today, end_time__lt=now_time)
+                        | models.Q(status__in=["COMPLETED", "CANCELLED", "NO_SHOW", "REFUNDED"])
+                    ).order_by("-date", "-start_time")
         else:
-            bookings = (
-                Booking.objects.filter(customer=user)
-                .select_related("turf")
-                .prefetch_related("slots")
-            )
-            today = timezone.now().date()
+            bookings = base_qs
             if tab == "upcoming":
                 bookings = bookings.filter(
-                    date__gte=today,
-                    status__in=[
-                        "CONFIRMED",
-                        "UPCOMING",
-                        "PAYMENT_PENDING",
-                        "CHECKED_IN",
-                        "IN_PROGRESS",
-                    ],
-                )
+                    models.Q(date__gt=today) | models.Q(date=today, end_time__gte=now_time),
+                    status__in=["CONFIRMED", "UPCOMING", "PAYMENT_PENDING", "CHECKED_IN", "IN_PROGRESS"],
+                ).order_by("date", "start_time")
             else:
                 bookings = bookings.filter(
-                    status__in=["COMPLETED", "CANCELLED", "NO_SHOW", "REFUNDED"]
-                )
+                    models.Q(date__lt=today)
+                    | models.Q(date=today, end_time__lt=now_time)
+                    | models.Q(status__in=["COMPLETED", "CANCELLED", "NO_SHOW", "REFUNDED"])
+                ).order_by("-date", "-start_time")
 
         serializer = BookingSerializer(bookings, many=True)
         return Response(serializer.data)

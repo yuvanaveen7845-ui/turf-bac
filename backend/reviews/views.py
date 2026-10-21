@@ -12,9 +12,7 @@ from accounts.permissions import IsAdmin, IsStaffOrAdmin
 
 class ReviewListCreateView(views.APIView):
     def get_permissions(self):
-        if self.request.method == "GET":
-            return [permissions.AllowAny()]
-        return [permissions.IsAuthenticated()]
+        return [permissions.AllowAny()]
 
     def get(self, request):
         turf_id = request.query_params.get("turf_id")
@@ -47,34 +45,77 @@ class ReviewListCreateView(views.APIView):
             )
 
         booking_id = request.data.get("booking_id")
-        booking = get_object_or_404(Booking, booking_id=booking_id)
+        turf_id = request.data.get("turf_id") or request.data.get("turf")
+        booking = None
+        target_turf = None
 
-        if booking.customer != request.user:
+        if booking_id:
+            booking = get_object_or_404(Booking, booking_id=booking_id)
+            target_turf = booking.turf
+            if request.user.is_authenticated and booking.customer != request.user:
+                return Response(
+                    {"error": "You can only review your own bookings."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if booking.reviews.exists():
+                return Response(
+                    {"error": "You have already reviewed this booking."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        elif turf_id:
+            target_turf = get_object_or_404(Turf, pk=turf_id)
+        else:
+            target_turf = Turf.objects.filter(is_active=True).first()
+            if not target_turf:
+                target_turf = get_object_or_404(Turf, pk=1)
+
+        rating = request.data.get("rating", 5)
+        try:
+            rating_val = int(rating)
+            if rating_val < 1 or rating_val > 5:
+                return Response(
+                    {"error": "Rating must be between 1 and 5 stars."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except (ValueError, TypeError):
             return Response(
-                {"error": "You can only review your own bookings."},
-                status=status.HTTP_403_FORBIDDEN,
+                {"error": "Rating must be an integer between 1 and 5."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if hasattr(booking, "review"):
+        review_text = request.data.get("review_text", "").strip()
+        if not review_text:
             return Response(
-                {"error": "You have already reviewed this booking."},
+                {"error": "Please write a brief review of your match experience."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         serializer = ReviewSerializer(data=request.data)
         if serializer.is_valid():
+            customer_user = request.user if request.user.is_authenticated else None
+            guest_name = request.data.get("guest_name", "").strip() or (
+                (customer_user.full_name or customer_user.email.split("@")[0]) if customer_user else "Verified Athlete"
+            )
+            guest_phone = request.data.get("guest_phone", "").strip() or (
+                customer_user.phone if customer_user else ""
+            )
+
             review = serializer.save(
-                customer=request.user, turf=booking.turf, booking=booking
+                customer=customer_user,
+                turf=target_turf,
+                booking=booking,
+                guest_name=guest_name,
+                guest_phone=guest_phone,
             )
             # Update turf average rating
             avg_rating = Review.objects.filter(
-                turf=booking.turf, is_hidden=False
+                turf=target_turf, is_hidden=False
             ).aggregate(Avg("rating"))["rating__avg"]
-            count = Review.objects.filter(turf=booking.turf, is_hidden=False).count()
+            count = Review.objects.filter(turf=target_turf, is_hidden=False).count()
             if avg_rating:
-                booking.turf.rating = round(avg_rating, 2)
-                booking.turf.total_reviews = count
-                booking.turf.save()
+                target_turf.rating = round(avg_rating, 2)
+                target_turf.total_reviews = count
+                target_turf.save()
 
             return Response(
                 ReviewSerializer(review).data, status=status.HTTP_201_CREATED

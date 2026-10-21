@@ -332,45 +332,9 @@ class PricingEngine:
         total_adjustments = subtotal - total_base
         discount_sources = []
 
-        # Dynamic Membership discount from active subscription or MembershipPlan
+        # Friends Turf does not offer automatic membership tier discounts on bookings
         membership_discount = Decimal("0.00")
         membership_label = ""
-        if user and user.is_authenticated:
-            # Check active subscription
-            from memberships.models import CustomerMembership, MembershipPlan
-            active_membership = CustomerMembership.objects.filter(
-                customer=user, status="ACTIVE", end_date__gte=timezone.now().date()
-            ).select_related("plan").first()
-
-            if active_membership and active_membership.plan:
-                plan = active_membership.plan
-                pct = Decimal(str(plan.discount_percentage))
-                if pct > 0:
-                    membership_discount = round((subtotal * pct) / Decimal("100.00"), 2)
-                    membership_label = f"{plan.name} Member ({pct}% Off)"
-            elif hasattr(user, "customer_profile"):
-                tier = user.customer_profile.membership_tier.strip().upper()
-                plan = MembershipPlan.objects.filter(slug__iexact=tier, is_active=True).first()
-                if plan and plan.discount_percentage > 0:
-                    pct = Decimal(str(plan.discount_percentage))
-                    membership_discount = round((subtotal * pct) / Decimal("100.00"), 2)
-                    membership_label = f"{plan.name} Tier ({pct}% Off)"
-                elif tier == "PLATINUM":
-                    membership_discount = round((subtotal * Decimal("15.00")) / Decimal("100.00"), 2)
-                    membership_label = "Platinum Tier (15% Off)"
-                elif tier == "GOLD":
-                    membership_discount = round((subtotal * Decimal("10.00")) / Decimal("100.00"), 2)
-                    membership_label = "Gold Tier (10% Off)"
-                elif tier == "SILVER":
-                    membership_discount = round((subtotal * Decimal("5.00")) / Decimal("100.00"), 2)
-                    membership_label = "Silver Tier (5% Off)"
-
-        if membership_discount > Decimal("0.00"):
-            discount_sources.append({
-                "source": "MEMBERSHIP",
-                "label": membership_label or "Membership Discount",
-                "amount": float(membership_discount),
-            })
 
         # Manual discount with actor permission check
         admin_discount = Decimal("0.00")

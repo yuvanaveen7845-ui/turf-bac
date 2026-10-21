@@ -5,13 +5,16 @@ from turfs.models import Turf
 
 
 class Review(models.Model):
-    booking = models.OneToOneField(
-        Booking, on_delete=models.CASCADE, related_name="review"
+    booking = models.ForeignKey(
+        Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviews"
     )
     customer = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="reviews"
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="reviews"
     )
     turf = models.ForeignKey(Turf, on_delete=models.PROTECT, related_name="reviews")
+
+    guest_name = models.CharField(max_length=150, blank=True)
+    guest_phone = models.CharField(max_length=20, blank=True)
 
     rating = models.IntegerField(default=5, help_text="Overall rating 1-5")
     facility_rating = models.IntegerField(
@@ -34,4 +37,5 @@ class Review(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"{self.customer.email} on {self.turf.name} - {self.rating}★"
+        user_ident = (self.customer.email if self.customer else self.guest_name) or "Player"
+        return f"{user_ident} on {self.turf.name} - {self.rating}★"

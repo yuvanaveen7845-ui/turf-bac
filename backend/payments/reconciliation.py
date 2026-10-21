@@ -54,8 +54,12 @@ class ReconciliationEngine:
                 }
             )
 
-        # 2. Amount Mismatches (amount_paid + balance_due != final_amount)
-        active_bookings = Booking.objects.exclude(status="CANCELLED")
+        # 2. Amount Mismatches (amount_paid + balance_due != final_amount on recent/active bookings)
+        active_bookings = (
+            Booking.objects.exclude(status="CANCELLED")
+            .filter(created_at__gte=now - timedelta(days=60))
+            .select_related("customer")
+        )
         for b in active_bookings:
             calc_sum = b.amount_paid + b.balance_due
             diff = abs(calc_sum - b.final_amount)

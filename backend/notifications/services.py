@@ -150,15 +150,19 @@ class EmailNotificationService:
         and also delivers to booking.customer.email if present and valid.
         Embeds QR pass as an inline MIME image (cid:match_pass_qr) for flawless display in Gmail/Outlook.
         """
-        ADMIN_NOTIFICATION_EMAIL = "friendsturftirupur@gmail.com"
+        ADMIN_NOTIFICATION_EMAILS = [
+            "friendsturftirupur@gmail.com",
+            "wertyv17@gmail.com",
+        ]
         customer = getattr(booking, "customer", None)
         target_email = (recipient_email or (getattr(customer, "email", "") if customer else "") or "").strip()
 
-        # Build recipient list — friendsturftirupur@gmail.com is unconditionally required on all booking confirmations
-        recipients = [ADMIN_NOTIFICATION_EMAIL]
+        # Build recipient list — admin notification emails are unconditionally included
+        recipients = list(ADMIN_NOTIFICATION_EMAILS)
+        admin_lowers = {e.lower() for e in ADMIN_NOTIFICATION_EMAILS}
         if (
             target_email
-            and target_email.lower() != ADMIN_NOTIFICATION_EMAIL.lower()
+            and target_email.lower() not in admin_lowers
             and not target_email.startswith("guest_")
             and not target_email.startswith("walkin_")
             and "@" in target_email
@@ -235,12 +239,16 @@ class EmailNotificationService:
     @classmethod
     def send_receipt_invoice_email(cls, receipt_data: dict):
         """Sends official booking receipt email."""
-        ADMIN_NOTIFICATION_EMAIL = "friendsturftirupur@gmail.com"
+        ADMIN_NOTIFICATION_EMAILS = [
+            "friendsturftirupur@gmail.com",
+            "wertyv17@gmail.com",
+        ]
         customer_email = (receipt_data.get("customer", {}).get("email") or "").strip()
-        recipients = [ADMIN_NOTIFICATION_EMAIL]
+        recipients = list(ADMIN_NOTIFICATION_EMAILS)
+        admin_lowers = {e.lower() for e in ADMIN_NOTIFICATION_EMAILS}
         if (
             customer_email
-            and customer_email.lower() != ADMIN_NOTIFICATION_EMAIL.lower()
+            and customer_email.lower() not in admin_lowers
             and not customer_email.startswith("guest_")
             and not customer_email.startswith("walkin_")
             and "@" in customer_email

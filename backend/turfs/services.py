@@ -276,6 +276,8 @@ class SchedulingEngine:
             "slot_state": slot_state,
             "locked_until": slot.locked_until.isoformat() if slot.locked_until else None,
             "booking_id": slot.booking_id or "",
+            "is_offline": bool(booking_info.get("is_offline", False)) if booking_info else False,
+            "booking_type": booking_info.get("booking_type") if booking_info else None,
         }
 
         if booking_info:
@@ -362,6 +364,8 @@ class SchedulingEngine:
                     "amount_paid": float(b.amount_paid),
                     "balance_due": float(b.balance_due),
                     "status": b.status,
+                    "booking_type": b.booking_type,
+                    "is_offline": b.booking_type == "WALK_IN",
                 }
 
         if pricing_context is None:
@@ -375,10 +379,21 @@ class SchedulingEngine:
         slots_to_update = []
 
         for slot in slots:
-            is_in_maintenance = any(
-                start <= slot.start_time and end >= slot.end_time
-                for start, end in maintenance_ranges
+            # Date-aware interval check (prevents 00:00:00 midnight flaw where 16:00 >= 00:00 auto-blocks 23:30 slot)
+            slot_s_dt = datetime.combine(date_obj, slot.start_time)
+            slot_e_dt = datetime.combine(
+                date_obj + timedelta(days=1 if slot.end_time <= slot.start_time else 0),
+                slot.end_time,
             )
+            is_in_maintenance = False
+            for start, end in maintenance_ranges:
+                m_s_dt = datetime.combine(date_obj, start)
+                m_e_dt = datetime.combine(
+                    date_obj + timedelta(days=1 if end <= start else 0), end
+                )
+                if m_s_dt <= slot_s_dt and m_e_dt >= slot_e_dt:
+                    is_in_maintenance = True
+                    break
             if is_in_maintenance and slot.status != "MAINTENANCE":
                 slot.status = "MAINTENANCE"
                 slots_to_update.append(slot)
@@ -471,6 +486,8 @@ class SchedulingEngine:
                     "amount_paid": float(b.amount_paid),
                     "balance_due": float(b.balance_due),
                     "status": b.status,
+                    "booking_type": b.booking_type,
+                    "is_offline": b.booking_type == "WALK_IN",
                 }
 
         # 4. Batch fetch existing slots for all turfs
@@ -533,10 +550,21 @@ class SchedulingEngine:
             serialized_slots = []
             for slot in turf_slots:
                 # Sync maintenance status
-                is_in_maintenance = any(
-                    start <= slot.start_time and end >= slot.end_time
-                    for start, end in m_ranges
+                # Date-aware interval check (prevents 00:00:00 midnight flaw where 16:00 >= 00:00 auto-blocks 23:30 slot)
+                slot_s_dt = datetime.combine(date_obj, slot.start_time)
+                slot_e_dt = datetime.combine(
+                    date_obj + timedelta(days=1 if slot.end_time <= slot.start_time else 0),
+                    slot.end_time,
                 )
+                is_in_maintenance = False
+                for start, end in m_ranges:
+                    m_s_dt = datetime.combine(date_obj, start)
+                    m_e_dt = datetime.combine(
+                        date_obj + timedelta(days=1 if end <= start else 0), end
+                    )
+                    if m_s_dt <= slot_s_dt and m_e_dt >= slot_e_dt:
+                        is_in_maintenance = True
+                        break
                 if is_in_maintenance and slot.status != "MAINTENANCE":
                     slot.status = "MAINTENANCE"
                     slots_to_update.append(slot)

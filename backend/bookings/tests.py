@@ -340,3 +340,60 @@ class BookingEngineTests(TestCase):
         self.assertEqual(booking.final_amount, Decimal("1500.00"))  # 1.5 hr * ₹1000/hr
         self.assertEqual(booking.balance_due, Decimal("1350.00"))
 
+    def test_midnight_slot_not_blocked_by_afternoon_maintenance(self):
+        """Scheduling afternoon maintenance (14:00-16:00) must NOT auto-block 23:30 slot."""
+        from maintenance.models import Maintenance
+        turf_late = Turf.objects.create(
+            name="Late Night Arena",
+            slug="late-night-arena",
+            sport_type="FOOTBALL",
+            base_price=Decimal("1000.00"),
+            operating_hours_start=time(6, 0),
+            operating_hours_end=time(23, 59),
+            slot_duration_minutes=30,
+        )
+        test_date = timezone.now().date() + timedelta(days=5)
+        slots = SchedulingEngine.generate_daily_slots(turf_late, test_date)
+
+        # Create maintenance at 14:00 - 16:00
+        Maintenance.objects.create(
+            turf=turf_late,
+            date=test_date,
+            start_time=time(14, 0),
+            end_time=time(16, 0),
+            reason="Grass grooming",
+            status="SCHEDULED",
+        )
+
+        avail = SchedulingEngine.get_turf_availability(turf_late, test_date)
+        late_slot = next((s for s in avail["slots"] if s["start_time"].startswith("23:30")), None)
+        self.assertIsNotNone(late_slot, "23:30 slot must exist")
+        self.assertEqual(late_slot["status"], "AVAILABLE")
+        self.assertEqual(late_slot["schedule_state"], "AVAILABLE")
+
+    def test_past_confirmed_booking_included_in_past_tab(self):
+        """A booking on a past date with status CONFIRMED must still appear in ?tab=past."""
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(user=self.customer)
+
+        past_date = timezone.now().date() - timedelta(days=2)
+        past_booking = Booking.objects.create(
+            booking_id="FT-PAST-TEST-01",
+            customer=self.customer,
+            turf=self.turf,
+            date=past_date,
+            start_time=time(18, 0),
+            end_time=time(19, 0),
+            status="CONFIRMED",
+            total_amount=Decimal("1000.00"),
+            final_amount=Decimal("1000.00"),
+            amount_paid=Decimal("1000.00"),
+            balance_due=Decimal("0.00"),
+        )
+
+        res = client.get("/api/bookings/?tab=past")
+        self.assertEqual(res.status_code, 200)
+        booking_ids = [b["booking_id"] for b in res.data]
+        self.assertIn("FT-PAST-TEST-01", booking_ids)
+

@@ -1066,9 +1066,9 @@ class AdminCustomerListView(views.APIView):
                 | models.Q(last_name__icontains=search)
                 | models.Q(phone__icontains=search)
             )
-        # Ensure customer profiles exist and are synced
+        # Ensure missing customer profiles exist without firing N+1 booking queries
         for c in customers:
-            if not hasattr(c, "customer_profile") or c.customer_profile is None or (c.bookings.count() > 0 and c.customer_profile.total_bookings == 0):
+            if not hasattr(c, "customer_profile") or c.customer_profile is None:
                 CustomerProfile.sync_for_user(c)
 
         serializer = UserSerializer(customers, many=True)

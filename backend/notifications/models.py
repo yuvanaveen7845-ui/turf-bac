@@ -29,6 +29,10 @@ class Notification(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="notif_user_created_idx"),
+            models.Index(fields=["user", "is_read"], name="notif_user_read_idx"),
+        ]
 
     def __str__(self):
         return (
